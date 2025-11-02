@@ -1,9 +1,7 @@
 #![forbid(unsafe_code)]
 
 use crate::{
-    background::perform_background_tasks,
-    config::Config,
-    middleware::aws_sig_v4::{AwsCredential, AwsSigV4AuthLayer},
+    background::perform_background_tasks, config::Config, middleware::aws_sig_v4::AwsSigV4AuthLayer,
 };
 use axum::{Extension, Router, http::StatusCode, routing::post_service};
 use axum_server::tls_rustls::RustlsConfig;
@@ -47,8 +45,6 @@ async fn server() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let credentials = AwsCredential::new(config.access_key_id, config.access_key_secret);
-
     // Setup database
     let db = database::create_database(config.encryption_key, config.database_path).await?;
 
@@ -59,7 +55,7 @@ async fn server() -> Result<(), Box<dyn Error>> {
     // Setup router
     let app = Router::new()
         .route_service("/", post_service(handlers_service))
-        .layer(AwsSigV4AuthLayer::new(credentials))
+        .layer(AwsSigV4AuthLayer::new(config.credentials))
         .route("/health", axum::routing::get(health))
         .layer(Extension(db.clone()))
         .layer(TraceLayer::new_for_http());

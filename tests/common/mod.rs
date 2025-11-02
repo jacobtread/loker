@@ -2,7 +2,7 @@ use axum::{Extension, Router, routing::post_service};
 use loker::{
     database::{DbPool, initialize_database},
     handlers::{self},
-    middleware::aws_sig_v4::{AwsCredential, AwsSigV4AuthLayer},
+    middleware::aws_sig_v4::AwsSigV4AuthLayer,
 };
 use sqlx::sqlite::SqlitePoolOptions;
 
@@ -10,20 +10,9 @@ use aws_config::{BehaviorVersion, Region, SdkConfig};
 use aws_sdk_secretsmanager::config::{Credentials, SharedCredentialsProvider};
 use tokio::task::AbortHandle;
 
-const TEST_ACCESS_KEY_ID: &str = "test";
-const TEST_ACCESS_KEY_SECRET: &str = "test";
-
 /// Create an AWS sdk config for use in tests
 #[allow(dead_code)]
-pub fn test_sdk_config(endpoint_url: &str) -> SdkConfig {
-    let credentials = Credentials::new(
-        TEST_ACCESS_KEY_ID,
-        TEST_ACCESS_KEY_SECRET,
-        None,
-        None,
-        "test",
-    );
-
+pub fn test_sdk_config(endpoint_url: &str, credentials: Credentials) -> SdkConfig {
     SdkConfig::builder()
         .behavior_version(BehaviorVersion::v2025_08_07())
         .region(Region::from_static("us-east-1"))
@@ -72,22 +61,25 @@ pub async fn test_server() -> (aws_sdk_secretsmanager::Client, TestServer) {
     let server_address = listener.local_addr().unwrap();
     let harness_db = db.clone();
 
+    let credentials = Credentials::for_tests();
+    let credentials_client_copy = credentials.clone();
+
     let abort_handle = tokio::spawn(async move {
         let handlers = handlers::create_handlers();
         let handlers_service = handlers.into_service();
         let app = Router::new()
             .route_service("/", post_service(handlers_service))
-            .layer(AwsSigV4AuthLayer::new(AwsCredential::new(
-                TEST_ACCESS_KEY_ID.to_string(),
-                TEST_ACCESS_KEY_SECRET.to_string(),
-            )))
+            .layer(AwsSigV4AuthLayer::new(credentials))
             .layer(Extension(db.clone()));
 
         axum::serve(listener, app).await.unwrap();
     })
     .abort_handle();
 
-    let sdk_config = test_sdk_config(&format!("http://{server_address}/"));
+    let sdk_config = test_sdk_config(
+        &format!("http://{server_address}/"),
+        credentials_client_copy,
+    );
     let client = aws_sdk_secretsmanager::Client::new(&sdk_config);
 
     (

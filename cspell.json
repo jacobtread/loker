@@ -23,6 +23,7 @@
     "unvalidated",
     "Timelike",
     "ASCTIME",
-    "FIXDATE"
+    "FIXDATE",
+    "nanos"
   ]
 }

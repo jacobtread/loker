@@ -1,3 +1,4 @@
+use aws_credential_types::Credentials;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use thiserror::Error;
 
@@ -25,10 +26,8 @@ pub struct Config {
     /// Path to the HTTPS private key file
     pub private_key_path: String,
 
-    /// Access key ID for AWS SigV4
-    pub access_key_id: String,
-    /// Access key secret for AWS SigV4
-    pub access_key_secret: String,
+    /// Credentials for AWS SigV4
+    pub credentials: Credentials,
 }
 
 #[derive(Debug, Error)]
@@ -57,6 +56,14 @@ impl Config {
 
         let access_key_secret = std::env::var("SM_ACCESS_KEY_SECRET")
             .map_err(|_| ConfigError::MissingAccessKeySecret)?;
+
+        let credentials = Credentials::new(
+            access_key_id,
+            access_key_secret,
+            None,
+            None,
+            "sm-credentials",
+        );
 
         let database_path =
             std::env::var("SM_DATABASE_PATH").unwrap_or_else(|_| "secrets.db".to_string());
@@ -94,8 +101,7 @@ impl Config {
             server_address,
             certificate_path,
             private_key_path,
-            access_key_id,
-            access_key_secret,
+            credentials,
         })
     }
 }

@@ -1,51 +1,42 @@
 use crate::{
     handlers::error::{
-        AwsErrorResponse, IncompleteSignature, InvalidClientTokenId, InvalidRequestException,
-        MissingAuthenticationToken, SignatureDoesNotMatch,
+        AwsErrorResponse, IncompleteSignature, InternalServiceError, InvalidClientTokenId,
+        InvalidRequestException, MissingAuthenticationToken, SignatureDoesNotMatch,
     },
     utils::{
-        aws_sig_v4::{aws_sig_v4, create_canonical_request, parse_auth_header},
-        date::{parse_amz_date, parse_http_date},
+        aws_sig_v4::parse_auth_header,
+        date::{chrono_to_system_time, parse_amz_date, parse_http_date},
     },
+};
+use aws_credential_types::Credentials;
+use aws_sigv4::{
+    http_request::{SignableBody, SignableRequest, SigningSettings, sign},
+    sign::v4::SigningParams,
 };
 use axum::{
     body::Body,
-    http::{Request, header::AUTHORIZATION},
+    http::{
+        Request,
+        header::{AUTHORIZATION, ToStrError},
+    },
     response::{IntoResponse, Response},
 };
 use chrono::Utc;
 use futures::future::BoxFuture;
 use http_body_util::BodyExt;
-use std::{mem::swap, sync::Arc};
+use std::mem::swap;
 use tower::{Layer, Service};
-
-/// Credential for the [AwsSigV4AuthLayer] to allow access to
-pub struct AwsCredential {
-    access_key_id: String,
-    access_key_secret: String,
-}
-
-impl AwsCredential {
-    pub fn new(access_key_id: String, access_key_secret: String) -> Self {
-        Self {
-            access_key_id,
-            access_key_secret,
-        }
-    }
-}
 
 /// Middleware provider layer
 #[derive(Clone)]
 pub struct AwsSigV4AuthLayer {
-    credentials: Arc<AwsCredential>,
+    credentials: Credentials,
 }
 
 impl AwsSigV4AuthLayer {
     /// Create a new AWS SigV4 layer using the provided credentials
-    pub fn new(credentials: AwsCredential) -> Self {
-        Self {
-            credentials: Arc::new(credentials),
-        }
+    pub fn new(credentials: Credentials) -> Self {
+        Self { credentials }
     }
 }
 
@@ -64,7 +55,7 @@ impl<S> Layer<S> for AwsSigV4AuthLayer {
 #[derive(Clone)]
 pub struct AwsSigV4AuthMiddleware<S> {
     inner: S,
-    credentials: Arc<AwsCredential>,
+    credentials: Credentials,
 }
 
 impl<S> Service<Request<Body>> for AwsSigV4AuthMiddleware<S>
@@ -178,44 +169,12 @@ where
                 }
             };
 
-            let mut credentials_parts = auth.credential.split('/');
-            let access_key_id = match credentials_parts.next() {
-                Some(value) => value,
-                None => {
-                    return Ok(AwsErrorResponse(IncompleteSignature).into_response());
-                }
-            };
-
-            let _date_yyyymmdd = match credentials_parts.next() {
-                Some(value) => value,
-                None => {
-                    return Ok(AwsErrorResponse(IncompleteSignature).into_response());
-                }
-            };
-
-            let region = match credentials_parts.next() {
-                Some(value) => value,
-                None => {
-                    return Ok(AwsErrorResponse(IncompleteSignature).into_response());
-                }
-            };
-
-            let service = match credentials_parts.next() {
-                Some(value) => value,
-                None => {
-                    return Ok(AwsErrorResponse(IncompleteSignature).into_response());
-                }
-            };
-
             // Missing the aws4_request portion of the credential
-            if credentials_parts
-                .next()
-                .is_none_or(|value| value != "aws4_request")
-            {
+            if auth.signing_scope.aws4_request != "aws4_request" {
                 return Ok(AwsErrorResponse(IncompleteSignature).into_response());
             }
 
-            if access_key_id != credential.access_key_id {
+            if auth.signing_scope.access_key_id != credential.access_key_id() {
                 // Invalid access key
                 return Ok(AwsErrorResponse(InvalidClientTokenId).into_response());
             }
@@ -228,14 +187,72 @@ where
                 }
             };
 
-            let canonical_request = create_canonical_request(&auth.signed_headers, &parts, &body);
-            let signature = aws_sig_v4(
-                date,
-                region,
-                service,
-                &canonical_request,
-                &credential.access_key_secret,
-            );
+            // Convert request date into a [SystemTime] timestamp for AWS-SigV4
+            let time = match chrono_to_system_time(date) {
+                Some(value) => value,
+                None => {
+                    return Ok(AwsErrorResponse(InvalidRequestException).into_response());
+                }
+            };
+
+            // Setup the signing settings
+            let identity = credential.into();
+            let signing_settings = SigningSettings::default();
+            let signing_params = match SigningParams::builder()
+                .identity(&identity)
+                .region(auth.signing_scope.region)
+                .name(auth.signing_scope.service)
+                .time(time)
+                .settings(signing_settings)
+                .build()
+            {
+                Ok(value) => value.into(),
+                Err(_error) => {
+                    return Ok(AwsErrorResponse(InternalServiceError).into_response());
+                }
+            };
+
+            // Collect request headers that were included in the signed request
+            let headers =
+                match parts
+                    .headers
+                    .iter()
+                    .try_fold(Vec::new(), |mut headers, (name, value)| {
+                        let name = name.as_str();
+                        if auth.signed_headers.contains(&name) {
+                            let value = value.to_str()?;
+                            headers.push((name, value));
+                        }
+
+                        Ok::<_, ToStrError>(headers)
+                    }) {
+                    Ok(value) => value,
+                    Err(_error) => {
+                        return Ok(AwsErrorResponse(InvalidRequestException).into_response());
+                    }
+                };
+
+            // Create the signable request
+            let signable_request = match SignableRequest::new(
+                parts.method.as_str(),
+                parts.uri.to_string(),
+                headers.into_iter(),
+                SignableBody::Bytes(&body),
+            ) {
+                Ok(value) => value,
+                Err(_error) => {
+                    //
+                    return Ok(AwsErrorResponse(InvalidRequestException).into_response());
+                }
+            };
+
+            let (_signing_instructions, signature) = match sign(signable_request, &signing_params) {
+                Ok(value) => value.into_parts(),
+                Err(_error) => {
+                    //
+                    return Ok(AwsErrorResponse(InternalServiceError).into_response());
+                }
+            };
 
             if signature != auth.signature {
                 // Verify failure, bad signature

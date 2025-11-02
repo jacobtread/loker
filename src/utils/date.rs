@@ -1,3 +1,5 @@
+use std::time::{Duration, SystemTime};
+
 use chrono::{DateTime, NaiveDateTime, Utc};
 use thiserror::Error;
 
@@ -18,16 +20,6 @@ pub enum AmzDateError {
     Invalid,
 }
 
-/// Format a date for the X-Amz-Date
-pub fn format_amz_date(date: &DateTime<Utc>) -> String {
-    format!("{}Z", date.format("%Y%m%dT%H%M%S"))
-}
-
-/// Format a date in the yyyymmdd format for credentials scopes
-pub fn format_date_yyyymmdd(date: &DateTime<Utc>) -> String {
-    date.format("%Y%m%d").to_string()
-}
-
 /// Parses the date value from the X-Amz-Date header
 pub fn parse_amz_date(value: &str) -> Result<DateTime<Utc>, AmzDateError> {
     let value = value.strip_suffix('Z').ok_or(AmzDateError::Invalid)?;
@@ -35,6 +27,14 @@ pub fn parse_amz_date(value: &str) -> Result<DateTime<Utc>, AmzDateError> {
 
     // Convert to UTC
     Ok(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
+}
+
+/// Convert a chrono Utc date time to a SystemTime
+pub fn chrono_to_system_time(value: DateTime<Utc>) -> Option<SystemTime> {
+    let duration_since_epoch = value.timestamp() as u64;
+    let nanos = value.timestamp_subsec_nanos();
+    let duration = Duration::new(duration_since_epoch, nanos);
+    SystemTime::UNIX_EPOCH.checked_add(duration)
 }
 
 const IMF_FIXDATE_PATTERN: &str = "%a, %d %b %Y %T GMT";
