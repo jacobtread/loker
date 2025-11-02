@@ -1,5 +1,6 @@
 use std::{ops::DerefMut, path::Path};
 
+use futures::future::BoxFuture;
 use sqlx::{Sqlite, SqlitePool, Transaction, sqlite::SqlitePoolOptions};
 
 pub use sqlx::SqliteExecutor as DbExecutor;
@@ -75,13 +76,47 @@ pub async fn create_database(key: String, raw_path: String) -> Result<DbPool, Cr
     Ok(pool)
 }
 
+/// Initializes the database ensuring the migrations table is setup and that all migrations
+/// are applied
 pub async fn initialize_database(db: &DbPool) -> DbResult<()> {
-    let mut t = db.begin().await?;
-
-    setup_migrations(&mut t).await?;
-    apply_migrations(&mut t).await?;
-
-    t.commit().await?;
+    transaction(db, move |t| {
+        Box::pin(async move {
+            setup_migrations(t).await?;
+            apply_migrations(t).await?;
+            Ok::<_, DbErr>(())
+        })
+    })
+    .await?;
 
     Ok(())
+}
+
+/// Helper to perform an action future that requires a database transaction
+/// ensures that if the action fails the database will rollback immediately
+pub async fn transaction<'db, A, O, E>(db: &'db DbPool, action: A) -> Result<O, E>
+where
+    A: for<'a> FnOnce(&'a mut DbTransaction<'db>) -> BoxFuture<'a, Result<O, E>>,
+    E: From<DbErr>,
+{
+    let mut t = db
+        .begin()
+        .await
+        .inspect_err(|error| tracing::error!(?error, "failed to begin transaction"))?;
+
+    let output = match action(&mut t).await {
+        Ok(value) => value,
+        Err(error) => {
+            if let Err(error) = t.rollback().await {
+                tracing::error!(?error, "failed to rollback transaction")
+            }
+
+            return Err(error);
+        }
+    };
+
+    t.commit()
+        .await
+        .inspect_err(|error| tracing::error!(?error, "failed to commit transaction"))?;
+
+    Ok(output)
 }

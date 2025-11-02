@@ -1,7 +1,8 @@
 use crate::{
     database::{
-        DbPool,
+        DbErr, DbPool,
         secrets::{get_secret_latest_version, remove_secret_tag},
+        transaction,
     },
     handlers::{
         Handler,
@@ -44,21 +45,21 @@ impl Handler for UntagResourceHandler {
             .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
             .ok_or(ResourceNotFoundException)?;
 
-        let mut t = db
-            .begin()
-            .await
-            .inspect_err(|error| tracing::error!(?error, "failed to begin transaction"))?;
+        transaction(db, move |t| {
+            Box::pin(async move {
+                // Attach all the secrets
+                for key in tag_keys {
+                    remove_secret_tag(t.deref_mut(), &secret.arn, &key)
+                        .await
+                        .inspect_err(|error| {
+                            tracing::error!(?error, "failed to remove secret tag")
+                        })?;
+                }
 
-        // Attach all the secrets
-        for key in tag_keys {
-            remove_secret_tag(t.deref_mut(), &secret.arn, &key)
-                .await
-                .inspect_err(|error| tracing::error!(?error, "failed to remove secret tag"))?;
-        }
-
-        t.commit()
-            .await
-            .inspect_err(|error| tracing::error!(?error, "failed to commit transaction"))?;
+                Ok::<_, DbErr>(())
+            })
+        })
+        .await?;
 
         Ok(UntagResourceResponse {})
     }

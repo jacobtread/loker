@@ -5,6 +5,7 @@ use crate::{
             CreateSecret, CreateSecretVersion, add_secret_version_stage, create_secret,
             create_secret_version, get_secret_by_version_id, put_secret_tag,
         },
+        transaction,
     },
     handlers::{
         Handler,
@@ -97,159 +98,140 @@ impl Handler for CreateSecretHandler {
             return Err(InvalidRequestException.into());
         }
 
-        let mut t = db
-            .begin()
-            .await
-            .inspect_err(|error| tracing::error!(?error, "failed to begin transaction"))?;
-
-        // Create the secret
-        if let Err(error) = create_secret(
-            t.deref_mut(),
-            CreateSecret {
-                arn: arn.clone(),
-                name: name.clone(),
-                description: request.description,
-            },
-        )
-        .await
-        {
-            if let Some(error) = error.as_database_error()
-                && error.is_unique_violation()
-            {
-                // Must rollback the transaction before attempting to use the connection
-                if let Err(error) = t.rollback().await {
-                    tracing::error!(?error, "failed to rollback transaction");
-                }
-
-                // Check if the secret has been created
-                let secret = get_secret_by_version_id(db, &name, &version_id)
-                    .await
-                    .inspect_err(|error| {
-                        tracing::error!(?error, "failed to determine existing version")
-                    })?;
-
-                let secret = match secret {
-                    Some(value) => value,
-                    None => {
-                        // This version we tried to store was not created so this is an already exists error
-                        return Err(ResourceExistsException.into());
-                    }
-                };
-
-                // If the stored version data doesn't match this is an error that
-                // the resource already exists
-                if secret.secret_string.ne(&secret_string)
-                    || secret.secret_binary.ne(&secret_binary)
+        transaction(db, move |t| {
+            Box::pin(async move {
+                // Create the secret
+                if let Err(error) = create_secret(
+                    t.deref_mut(),
+                    CreateSecret {
+                        arn: arn.clone(),
+                        name: name.clone(),
+                        description: request.description,
+                    },
+                )
+                .await
                 {
-                    return Err(ResourceExistsException.into());
+                    if let Some(error) = error.as_database_error()
+                        && error.is_unique_violation()
+                    {
+                        // Check if the secret has been created
+                        let secret = get_secret_by_version_id(t.deref_mut(), &name, &version_id)
+                            .await
+                            .inspect_err(|error| {
+                                tracing::error!(?error, "failed to determine existing version")
+                            })?;
+
+                        let secret = match secret {
+                            Some(value) => value,
+                            None => {
+                                // This version we tried to store was not created so this is an already exists error
+                                return Err(ResourceExistsException.into());
+                            }
+                        };
+
+                        // If the stored version data doesn't match this is an error that
+                        // the resource already exists
+                        if secret.secret_string.ne(&secret_string)
+                            || secret.secret_binary.ne(&secret_binary)
+                        {
+                            return Err(ResourceExistsException.into());
+                        }
+
+                        // Request has already been fulfilled
+                        return Ok(CreateSecretResponse {
+                            arn: secret.arn,
+                            name,
+                            version_id,
+                        });
+                    }
+
+                    tracing::error!(?error, "failed to create secret");
+                    return Err(InternalServiceError.into());
                 }
 
-                // Request has already been fulfilled
-                return Ok(CreateSecretResponse {
-                    arn: secret.arn,
-                    name,
-                    version_id,
-                });
-            }
+                // Create the initial secret version
+                if let Err(error) = create_secret_version(
+                    t.deref_mut(),
+                    CreateSecretVersion {
+                        secret_arn: arn.clone(),
+                        version_id: version_id.clone(),
+                        secret_string: secret_string.clone(),
+                        secret_binary: secret_binary.clone(),
+                    },
+                )
+                .await
+                {
+                    if let Some(error) = error.as_database_error()
+                        && error.is_unique_violation()
+                    {
+                        // Check if the secret has been created
+                        let secret = match get_secret_by_version_id(
+                            t.deref_mut(),
+                            &arn,
+                            &version_id,
+                        )
+                        .await
+                        {
+                            Ok(value) => value,
+                            Err(error) => {
+                                tracing::error!(?error, "failed to determine existing version");
+                                return Err(InternalServiceError.into());
+                            }
+                        };
 
-            tracing::error!(?error, "failed to create secret");
-            return Err(InternalServiceError.into());
-        }
+                        let secret = match secret {
+                            Some(value) => value,
+                            None => {
+                                // Shouldn't be possible if we hit the unique violation
+                                return Err(InternalServiceError.into());
+                            }
+                        };
 
-        // Create the initial secret version
-        if let Err(error) = create_secret_version(
-            t.deref_mut(),
-            CreateSecretVersion {
-                secret_arn: arn.clone(),
-                version_id: version_id.clone(),
-                secret_string: secret_string.clone(),
-                secret_binary: secret_binary.clone(),
-            },
-        )
-        .await
-        {
-            if let Some(error) = error.as_database_error()
-                && error.is_unique_violation()
-            {
-                // Must rollback the transaction before attempting to use the connection
-                if let Err(error) = t.rollback().await {
-                    tracing::error!(?error, "failed to rollback transaction");
+                        // If the stored version data doesn't match this is an error that
+                        // the resource already exists
+                        if secret.secret_string.ne(&secret_string)
+                            || secret.secret_binary.ne(&secret_binary)
+                        {
+                            return Err(ResourceExistsException.into());
+                        }
+
+                        // Request has already been fulfilled
+                        return Ok(CreateSecretResponse {
+                            arn,
+                            name,
+                            version_id,
+                        });
+                    }
+
+                    tracing::error!(?error, "failed to create secret version");
+                    return Err(InternalServiceError.into());
                 }
 
-                // Check if the secret has been created
-                let secret = match get_secret_by_version_id(db, &arn, &version_id).await {
-                    Ok(value) => value,
-                    Err(error) => {
-                        tracing::error!(?error, "failed to determine existing version");
+                // Add the AWSCURRENT stage to the new version
+                if let Err(error) =
+                    add_secret_version_stage(t.deref_mut(), &arn, &version_id, "AWSCURRENT").await
+                {
+                    tracing::error!(?error, "failed to add AWSPREVIOUS tag to secret");
+                    return Err(InternalServiceError.into());
+                }
+
+                // Attach all the secrets
+                for tag in tags {
+                    if let Err(error) =
+                        put_secret_tag(t.deref_mut(), &arn, &tag.key, &tag.value).await
+                    {
+                        tracing::error!(?error, "failed to set secret tag");
                         return Err(InternalServiceError.into());
                     }
-                };
-
-                let secret = match secret {
-                    Some(value) => value,
-                    None => {
-                        // Shouldn't be possible if we hit the unique violation
-                        return Err(InternalServiceError.into());
-                    }
-                };
-
-                // If the stored version data doesn't match this is an error that
-                // the resource already exists
-                if secret.secret_string.ne(&secret_string)
-                    || secret.secret_binary.ne(&secret_binary)
-                {
-                    return Err(ResourceExistsException.into());
                 }
 
-                // Request has already been fulfilled
-                return Ok(CreateSecretResponse {
+                Ok::<_, AwsError>(CreateSecretResponse {
                     arn,
                     name,
                     version_id,
-                });
-            }
-
-            // Rollback the transaction on failure
-            if let Err(error) = t.rollback().await {
-                tracing::error!(?error, "failed to rollback transaction");
-            }
-
-            tracing::error!(?error, "failed to create secret version");
-            return Err(InternalServiceError.into());
-        }
-
-        // Add the AWSCURRENT stage to the new version
-        if let Err(error) =
-            add_secret_version_stage(t.deref_mut(), &arn, &version_id, "AWSCURRENT").await
-        {
-            if let Err(error) = t.rollback().await {
-                tracing::error!(?error, "failed to rollback transaction");
-            }
-
-            tracing::error!(?error, "failed to add AWSPREVIOUS tag to secret");
-            return Err(InternalServiceError.into());
-        }
-
-        // Attach all the secrets
-        for tag in tags {
-            if let Err(error) = put_secret_tag(t.deref_mut(), &arn, &tag.key, &tag.value).await {
-                if let Err(error) = t.rollback().await {
-                    tracing::error!(?error, "failed to rollback transaction");
-                }
-
-                tracing::error!(?error, "failed to set secret tag");
-                return Err(InternalServiceError.into());
-            }
-        }
-
-        t.commit()
-            .await
-            .inspect_err(|error| tracing::error!(?error, "failed to commit transaction"))?;
-
-        Ok(CreateSecretResponse {
-            arn,
-            name,
-            version_id,
+                })
+            })
         })
+        .await
     }
 }

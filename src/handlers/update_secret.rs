@@ -6,6 +6,7 @@ use crate::{
             get_secret_latest_version, remove_secret_version_stage,
             remove_secret_version_stage_any, update_secret_description,
         },
+        transaction,
     },
     handlers::{
         Handler,
@@ -83,101 +84,90 @@ impl Handler for UpdateSecretHandler {
             .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
             .ok_or(ResourceNotFoundException)?;
 
-        let mut t = db
-            .begin()
-            .await
-            .inspect_err(|error| tracing::error!(?error, "failed to begin transaction"))?;
-
-        if let Some(description) = description {
-            update_secret_description(t.deref_mut(), &secret.arn, &description)
-                .await
-                .inspect_err(|error| {
-                    tracing::error!(?error, "failed to update secret version description")
-                })?;
-        }
-
-        let version_id = if secret_string.is_some() || secret_binary.is_some() {
-            let ClientRequestToken(version_id) = client_request_token.unwrap_or_default();
-
-            // Create a new current secret version
-            if let Err(error) = create_secret_version(
-                t.deref_mut(),
-                CreateSecretVersion {
-                    secret_arn: secret.arn.clone(),
-                    version_id: version_id.clone(),
-                    secret_string,
-                    secret_binary,
-                },
-            )
-            .await
-            {
-                if let Some(error) = error.as_database_error()
-                    && error.is_unique_violation()
-                {
-                    // Another request already created this version
-                    return Ok(UpdateSecretResponse {
-                        arn: secret.arn,
-                        name: secret.name,
-                        version_id: None,
-                    });
+        let (secret, version_id) = transaction(db, move |t| {
+            Box::pin(async move {
+                if let Some(description) = description {
+                    update_secret_description(t.deref_mut(), &secret.arn, &description)
+                        .await
+                        .inspect_err(|error| {
+                            tracing::error!(?error, "failed to update secret version description")
+                        })?;
                 }
 
-                // Rollback the transaction on failure
-                if let Err(error) = t.rollback().await {
-                    tracing::error!(?error, "failed to rollback transaction");
-                }
+                let version_id = if secret_string.is_some() || secret_binary.is_some() {
+                    let ClientRequestToken(version_id) = client_request_token.unwrap_or_default();
 
-                tracing::error!(?error, "failed to create secret version");
-                return Err(InternalServiceError.into());
-            }
+                    // Create a new current secret version
+                    if let Err(error) = create_secret_version(
+                        t.deref_mut(),
+                        CreateSecretVersion {
+                            secret_arn: secret.arn.clone(),
+                            version_id: version_id.clone(),
+                            secret_string,
+                            secret_binary,
+                        },
+                    )
+                    .await
+                    {
+                        if let Some(error) = error.as_database_error()
+                            && error.is_unique_violation()
+                        {
+                            // Another request already created this version
+                            return Ok((secret, None));
+                        }
 
-            // Remove AWSPREVIOUS from any other versions
-            remove_secret_version_stage_any(t.deref_mut(), &secret.arn, "AWSPREVIOUS")
-                .await
-                .inspect_err(|error| {
-                    tracing::error!(?error, "failed to deprecate old previous secret")
-                })?;
+                        tracing::error!(?error, "failed to create secret version");
+                        return Err(InternalServiceError.into());
+                    }
 
-            // Add the AWSPREVIOUS stage to the old current
-            add_secret_version_stage(
-                t.deref_mut(),
-                &secret.arn,
-                &secret.version_id,
-                "AWSPREVIOUS",
-            )
-            .await
-            .inspect_err(|error| {
-                tracing::error!(?error, "failed to add AWSPREVIOUS tag to secret")
-            })?;
+                    // Remove AWSPREVIOUS from any other versions
+                    remove_secret_version_stage_any(t.deref_mut(), &secret.arn, "AWSPREVIOUS")
+                        .await
+                        .inspect_err(|error| {
+                            tracing::error!(?error, "failed to deprecate old previous secret")
+                        })?;
 
-            // Remove AWSCURRENT from the current version
-            remove_secret_version_stage(
-                t.deref_mut(),
-                &secret.arn,
-                &secret.version_id,
-                "AWSCURRENT",
-            )
-            .await
-            .inspect_err(|error| {
-                tracing::error!(?error, "failed to remove AWSCURRENT from old version")
-            })?;
+                    // Add the AWSPREVIOUS stage to the old current
+                    add_secret_version_stage(
+                        t.deref_mut(),
+                        &secret.arn,
+                        &secret.version_id,
+                        "AWSPREVIOUS",
+                    )
+                    .await
+                    .inspect_err(|error| {
+                        tracing::error!(?error, "failed to add AWSPREVIOUS tag to secret")
+                    })?;
 
-            // Add the AWSCURRENT stage to the new version
-            add_secret_version_stage(t.deref_mut(), &secret.arn, &version_id, "AWSCURRENT")
-                .await
-                .inspect_err(|error| {
-                    tracing::error!(?error, "failed to add AWSCURRENT tag to secret")
-                })?;
+                    // Remove AWSCURRENT from the current version
+                    remove_secret_version_stage(
+                        t.deref_mut(),
+                        &secret.arn,
+                        &secret.version_id,
+                        "AWSCURRENT",
+                    )
+                    .await
+                    .inspect_err(|error| {
+                        tracing::error!(?error, "failed to remove AWSCURRENT from old version")
+                    })?;
 
-            Some(version_id)
-        } else {
-            // Nothing to update
-            None
-        };
+                    // Add the AWSCURRENT stage to the new version
+                    add_secret_version_stage(t.deref_mut(), &secret.arn, &version_id, "AWSCURRENT")
+                        .await
+                        .inspect_err(|error| {
+                            tracing::error!(?error, "failed to add AWSCURRENT tag to secret")
+                        })?;
 
-        t.commit()
-            .await
-            .inspect_err(|error| tracing::error!(?error, "failed to commit transaction"))?;
+                    Some(version_id)
+                } else {
+                    // Nothing to update
+                    None
+                };
+
+                Ok::<_, AwsError>((secret, version_id))
+            })
+        })
+        .await?;
 
         Ok(UpdateSecretResponse {
             arn: secret.arn,

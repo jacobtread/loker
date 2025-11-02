@@ -1,7 +1,8 @@
 use crate::{
     database::{
-        DbPool,
+        DbErr, DbPool,
         secrets::{get_secret_latest_version, put_secret_tag},
+        transaction,
     },
     handlers::{
         Handler,
@@ -44,21 +45,19 @@ impl Handler for TagResourceHandler {
             .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
             .ok_or(ResourceNotFoundException)?;
 
-        let mut t = db
-            .begin()
-            .await
-            .inspect_err(|error| tracing::error!(?error, "failed to begin transaction"))?;
+        transaction(db, move |t| {
+            Box::pin(async move {
+                // Attach all the secrets
+                for tag in tags {
+                    put_secret_tag(t.deref_mut(), &secret.arn, &tag.key, &tag.value)
+                        .await
+                        .inspect_err(|error| tracing::error!(?error, "failed to set secret tag"))?;
+                }
 
-        // Attach all the secrets
-        for tag in tags {
-            put_secret_tag(t.deref_mut(), &secret.arn, &tag.key, &tag.value)
-                .await
-                .inspect_err(|error| tracing::error!(?error, "failed to set secret tag"))?;
-        }
-
-        t.commit()
-            .await
-            .inspect_err(|error| tracing::error!(?error, "failed to commit transaction"))?;
+                Ok::<_, DbErr>(())
+            })
+        })
+        .await?;
 
         Ok(TagResourceResponse {})
     }
