@@ -9,15 +9,11 @@ use crate::{
     },
     handlers::{
         Handler,
-        error::{
-            AwsErrorResponse, InternalServiceError, InvalidRequestException,
-            ResourceNotFoundException,
-        },
+        error::{AwsError, InvalidRequestException, ResourceNotFoundException},
         models::{SecretId, VersionId},
     },
     utils::date::datetime_to_f64,
 };
-use axum::response::{IntoResponse, Response};
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
@@ -62,7 +58,7 @@ impl Handler for GetSecretValueHandler {
     type Response = GetSecretValueResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, Response> {
+    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
         let version_id = request.version_id.map(VersionId::into_inner);
         let version_stage = request.version_stage;
@@ -78,30 +74,21 @@ impl Handler for GetSecretValueHandler {
             }
         };
 
-        let secret = match secret {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::error!(?error, "failed to get secret value");
-                return Err(AwsErrorResponse(InternalServiceError).into_response());
-            }
-        };
-
-        let secret = match secret {
-            Some(value) => value,
-            None => return Err(AwsErrorResponse(ResourceNotFoundException).into_response()),
-        };
+        let secret = secret
+            .inspect_err(|error| tracing::error!(?error, "failed to get secret value"))?
+            .ok_or(ResourceNotFoundException)?;
 
         // Secret is scheduled for deletion
         if secret.scheduled_delete_at.is_some() {
-            return Err(AwsErrorResponse(InvalidRequestException).into_response());
+            return Err(InvalidRequestException.into());
         }
 
-        if let Err(error) =
-            update_secret_version_last_accessed(db, &secret.arn, &secret.version_id).await
-        {
-            tracing::error!(?error, "failed to update secret last accessed");
-            return Err(AwsErrorResponse(InternalServiceError).into_response());
-        }
+        // Update the access timestamp
+        update_secret_version_last_accessed(db, &secret.arn, &secret.version_id)
+            .await
+            .inspect_err(|error| {
+                tracing::error!(?error, "failed to update secret last accessed");
+            })?;
 
         let created_at = if version_id.is_some() {
             secret.version_created_at

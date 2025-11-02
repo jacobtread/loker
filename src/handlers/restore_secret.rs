@@ -5,11 +5,10 @@ use crate::{
     },
     handlers::{
         Handler,
-        error::{AwsErrorResponse, InternalServiceError, ResourceNotFoundException},
+        error::{AwsError, ResourceNotFoundException},
         models::SecretId,
     },
 };
-use axum::response::IntoResponse;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
@@ -36,29 +35,17 @@ impl Handler for RestoreSecretHandler {
     type Response = RestoreSecretResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(
-        db: &DbPool,
-        request: Self::Request,
-    ) -> Result<Self::Response, axum::response::Response> {
+    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
 
-        let secret = match get_secret_latest_version(db, &secret_id).await {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::error!(?error, "failed to get secret");
-                return Err(AwsErrorResponse(InternalServiceError).into_response());
-            }
-        };
+        let secret = get_secret_latest_version(db, &secret_id)
+            .await
+            .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
+            .ok_or(ResourceNotFoundException)?;
 
-        let secret = match secret {
-            Some(value) => value,
-            None => return Err(AwsErrorResponse(ResourceNotFoundException).into_response()),
-        };
-
-        if let Err(error) = cancel_delete_secret(db, &secret.arn).await {
-            tracing::error!(?error, "failed to get secret");
-            return Err(AwsErrorResponse(InternalServiceError).into_response());
-        }
+        cancel_delete_secret(db, &secret.arn)
+            .await
+            .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?;
 
         Ok(RestoreSecretResponse {
             arn: secret.arn,

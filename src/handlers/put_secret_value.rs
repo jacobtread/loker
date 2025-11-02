@@ -9,13 +9,12 @@ use crate::{
     handlers::{
         Handler,
         error::{
-            AwsErrorResponse, InternalServiceError, InvalidRequestException,
-            ResourceExistsException, ResourceNotFoundException,
+            AwsError, InternalServiceError, InvalidRequestException, ResourceExistsException,
+            ResourceNotFoundException,
         },
         models::{ClientRequestToken, SecretBinary, SecretId, SecretString},
     },
 };
-use axum::response::{IntoResponse, Response};
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 use std::ops::DerefMut;
@@ -63,7 +62,7 @@ impl Handler for PutSecretValueHandler {
     type Response = PutSecretValueResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, Response> {
+    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
         let ClientRequestToken(version_id) = request.client_request_token.unwrap_or_default();
 
@@ -71,7 +70,7 @@ impl Handler for PutSecretValueHandler {
             Some(value) => {
                 // When specifying version stages must specify at least one
                 if value.is_empty() {
-                    return Err(AwsErrorResponse(InvalidRequestException).into_response());
+                    return Err(InvalidRequestException.into());
                 }
 
                 value
@@ -84,34 +83,23 @@ impl Handler for PutSecretValueHandler {
 
         // Must only specify one of the two
         if secret_string.is_some() && secret_binary.is_some() {
-            return Err(AwsErrorResponse(InvalidRequestException).into_response());
+            return Err(InvalidRequestException.into());
         }
 
         // Must specify at least one
         if secret_string.is_none() && secret_binary.is_none() {
-            return Err(AwsErrorResponse(InvalidRequestException).into_response());
+            return Err(InvalidRequestException.into());
         }
 
-        let secret = match get_secret_latest_version(db, &secret_id).await {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::error!(?error, "failed to get secret");
-                return Err(AwsErrorResponse(InternalServiceError).into_response());
-            }
-        };
+        let secret = get_secret_latest_version(db, &secret_id)
+            .await
+            .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
+            .ok_or(ResourceNotFoundException)?;
 
-        let secret = match secret {
-            Some(value) => value,
-            None => return Err(AwsErrorResponse(ResourceNotFoundException).into_response()),
-        };
-
-        let mut t = match db.begin().await {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::error!(?error, "failed to begin transaction");
-                return Err(AwsErrorResponse(InternalServiceError).into_response());
-            }
-        };
+        let mut t = db
+            .begin()
+            .await
+            .inspect_err(|error| tracing::error!(?error, "failed to begin transaction"))?;
 
         // Create the new secret version
         if let Err(error) = create_secret_version(
@@ -134,28 +122,20 @@ impl Handler for PutSecretValueHandler {
                 }
 
                 // Check if the secret has been created
-                let secret = match get_secret_by_version_id(db, &secret.arn, &version_id).await {
-                    Ok(value) => value,
-                    Err(error) => {
-                        tracing::error!(?error, "failed to determine existing version");
-                        return Err(AwsErrorResponse(InternalServiceError).into_response());
-                    }
-                };
-
-                let secret = match secret {
-                    Some(value) => value,
-                    None => {
-                        // Shouldn't be possible if we hit the unique violation
-                        return Err(AwsErrorResponse(InternalServiceError).into_response());
-                    }
-                };
+                let secret = get_secret_by_version_id(db, &secret.arn, &version_id)
+                    .await
+                    .inspect_err(|error| {
+                        tracing::error!(?error, "failed to determine existing version")
+                    })?
+                    // Unlikely but not impossible if we hit the unique violation
+                    .ok_or(InternalServiceError)?;
 
                 // If the stored version data doesn't match this is an error that
                 // the resource already exists
                 if secret.secret_string.ne(&secret_string)
                     || secret.secret_binary.ne(&secret_binary)
                 {
-                    return Err(AwsErrorResponse(ResourceExistsException).into_response());
+                    return Err(ResourceExistsException.into());
                 }
 
                 // Another request already created this version
@@ -168,56 +148,48 @@ impl Handler for PutSecretValueHandler {
             }
 
             tracing::error!(?error, "failed to create secret version");
-            return Err(AwsErrorResponse(InternalServiceError).into_response());
+            return Err(InternalServiceError.into());
         }
 
         // Add the requested stages
         for version_stage in &version_stages {
-            if let Err(error) =
-                remove_secret_version_stage_any(t.deref_mut(), &secret.arn, version_stage).await
-            {
-                tracing::error!(?error, "failed to remove version stage from secret");
-                return Err(AwsErrorResponse(InternalServiceError).into_response());
-            }
+            remove_secret_version_stage_any(t.deref_mut(), &secret.arn, version_stage)
+                .await
+                .inspect_err(|error| {
+                    tracing::error!(?error, "failed to remove version stage from secret")
+                })?;
 
             // If we are re-assigning AWSCURRENT ensure that the previous secret is given AWSPREVIOUS
             if version_stage == "AWSCURRENT" {
                 // Ensure nobody else has the AWSPREVIOUS stage
-                if let Err(error) =
-                    remove_secret_version_stage_any(t.deref_mut(), &secret.arn, "AWSPREVIOUS").await
-                {
-                    tracing::error!(?error, "failed to remove version stage from secret");
-                    return Err(AwsErrorResponse(InternalServiceError).into_response());
-                }
+                remove_secret_version_stage_any(t.deref_mut(), &secret.arn, "AWSPREVIOUS")
+                    .await
+                    .inspect_err(|error| {
+                        tracing::error!(?error, "failed to remove version stage from secret")
+                    })?;
 
-                // Add the AWSPREVIOUS stage to the old current
-                if let Err(error) = add_secret_version_stage(
+                // Add the AWSPREVIOUS stage to the old
+                add_secret_version_stage(
                     t.deref_mut(),
                     &secret.arn,
                     &secret.version_id,
                     "AWSPREVIOUS",
                 )
                 .await
-                {
-                    tracing::error!(?error, "failed to add AWSPREVIOUS tag to secret");
-                    return Err(AwsErrorResponse(InternalServiceError).into_response());
-                }
+                .inspect_err(|error| {
+                    tracing::error!(?error, "failed to add AWSPREVIOUS tag to secret")
+                })?;
             }
 
             // Add the requested version stage
-            if let Err(error) =
-                add_secret_version_stage(t.deref_mut(), &secret.arn, &version_id, version_stage)
-                    .await
-            {
-                tracing::error!(?error, "failed to add stage to secret");
-                return Err(AwsErrorResponse(InternalServiceError).into_response());
-            }
+            add_secret_version_stage(t.deref_mut(), &secret.arn, &version_id, version_stage)
+                .await
+                .inspect_err(|error| tracing::error!(?error, "failed to add stage to secret"))?;
         }
 
-        if let Err(error) = t.commit().await {
-            tracing::error!(?error, "failed to commit transaction");
-            return Err(AwsErrorResponse(InternalServiceError).into_response());
-        }
+        t.commit()
+            .await
+            .inspect_err(|error| tracing::error!(?error, "failed to commit transaction"))?;
 
         Ok(PutSecretValueResponse {
             arn: secret.arn,

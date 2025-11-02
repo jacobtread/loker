@@ -1,12 +1,19 @@
 use crate::{
     database::DbPool,
     handlers::{
-        batch_get_secret_value::BatchGetSecretValueHandler, create_secret::CreateSecretHandler,
-        delete_secret::DeleteSecretHandler, describe_secret::DescribeSecretHandler,
-        get_random_password::GetRandomPasswordHandler, get_secret_value::GetSecretValueHandler,
-        list_secret_version_ids::ListSecretVersionIdsHandler, list_secrets::ListSecretsHandler,
-        put_secret_value::PutSecretValueHandler, restore_secret::RestoreSecretHandler,
-        tag_resource::TagResourceHandler, untag_resource::UntagResourceHandler,
+        batch_get_secret_value::BatchGetSecretValueHandler,
+        create_secret::CreateSecretHandler,
+        delete_secret::DeleteSecretHandler,
+        describe_secret::DescribeSecretHandler,
+        error::{AwsError, IntoErrorResponse},
+        get_random_password::GetRandomPasswordHandler,
+        get_secret_value::GetSecretValueHandler,
+        list_secret_version_ids::ListSecretVersionIdsHandler,
+        list_secrets::ListSecretsHandler,
+        put_secret_value::PutSecretValueHandler,
+        restore_secret::RestoreSecretHandler,
+        tag_resource::TagResourceHandler,
+        untag_resource::UntagResourceHandler,
         update_secret::UpdateSecretHandler,
         update_secret_version_stage::UpdateSecretVersionStageHandler,
     },
@@ -18,8 +25,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use error::{
-    AwsErrorResponse, InternalServiceError, InvalidParameterException, InvalidRequestException,
-    NotImplemented,
+    InternalServiceError, InvalidParameterException, InvalidRequestException, NotImplemented,
 };
 use futures::future::BoxFuture;
 use garde::Validate;
@@ -132,7 +138,7 @@ impl Service<Request<Body>> for HandlerRouterService {
             {
                 Some(value) => value,
                 None => {
-                    return Ok(AwsErrorResponse(InvalidRequestException).into_response());
+                    return Ok(InvalidRequestException.into_error_response());
                 }
             };
 
@@ -142,13 +148,13 @@ impl Service<Request<Body>> for HandlerRouterService {
                 Ok(value) => value.to_bytes(),
                 Err(error) => {
                     tracing::error!(?error, "failed to collect bytes");
-                    return Ok(AwsErrorResponse(InternalServiceError).into_response());
+                    return Ok(InternalServiceError.into_error_response());
                 }
             };
 
             Ok(match handler {
                 Some(value) => value.handle(db, &body).await,
-                None => AwsErrorResponse(NotImplemented).into_response(),
+                None => NotImplemented.into_error_response(),
             })
         })
     }
@@ -162,7 +168,7 @@ pub trait Handler: Send + Sync + 'static {
     fn handle<'d>(
         db: &'d DbPool,
         request: Self::Request,
-    ) -> impl Future<Output = Result<Self::Response, Response>> + Send + 'd;
+    ) -> impl Future<Output = Result<Self::Response, AwsError>> + Send + 'd;
 }
 
 /// Associated type erased [Handler] that takes a generic request and provides
@@ -184,18 +190,18 @@ impl<H: Handler> ErasedHandler for HandlerBase<H> {
                 Ok(value) => value,
                 Err(error) => {
                     tracing::error!(?error, "failed to parse request");
-                    return AwsErrorResponse(InvalidRequestException).into_response();
+                    return InvalidRequestException.into_error_response();
                 }
             };
 
             if let Err(_error) = request.validate() {
                 // TODO: Share the error message with the user
-                return AwsErrorResponse(InvalidParameterException).into_response();
+                return InvalidParameterException.into_error_response();
             }
 
             match H::handle(db, request).await {
                 Ok(response) => Json(response).into_response(),
-                Err(error) => error,
+                Err(error) => error.into_error_response(),
             }
         })
     }

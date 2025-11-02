@@ -5,12 +5,11 @@ use crate::{
     },
     handlers::{
         Handler,
-        error::{AwsErrorResponse, InternalServiceError, InvalidRequestException},
+        error::{AwsError, InvalidRequestException},
         models::{Filter, PaginationToken, Tag},
     },
     utils::{date::datetime_to_f64, string::join_iter_string},
 };
-use axum::response::{IntoResponse, Response};
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -127,7 +126,7 @@ impl Handler for ListSecretsHandler {
     type Response = ListSecretsResponse;
 
     #[tracing::instrument(skip_all)]
-    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, Response> {
+    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
         let ListSecretsRequest {
             filters,
             include_planned_deletion,
@@ -141,22 +140,18 @@ impl Handler for ListSecretsHandler {
 
         let (limit, offset) = pagination_token
             .as_query_parts()
-            .ok_or_else(|| AwsErrorResponse(InvalidRequestException).into_response())?;
+            .ok_or(InvalidRequestException)?;
 
         let (secrets, count) = join!(
             get_secrets_by_filter(db, &filters, include_planned_deletion, limit, offset, asc),
             get_secrets_count_by_filter(db, &filters, include_planned_deletion),
         );
 
-        let secrets = secrets.map_err(|error| {
-            tracing::error!(?error, "failed to get secrets");
-            AwsErrorResponse(InternalServiceError).into_response()
-        })?;
+        let secrets =
+            secrets.inspect_err(|error| tracing::error!(?error, "failed to get secrets"))?;
 
-        let count = count.map_err(|error| {
-            tracing::error!(?error, "failed to get secrets count");
-            AwsErrorResponse(InternalServiceError).into_response()
-        })?;
+        let count =
+            count.inspect_err(|error| tracing::error!(?error, "failed to get secrets count"))?;
 
         let next_token = pagination_token
             .get_next_page(count)

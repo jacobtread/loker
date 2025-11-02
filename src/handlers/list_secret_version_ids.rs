@@ -5,15 +5,11 @@ use crate::{
     },
     handlers::{
         Handler,
-        error::{
-            AwsErrorResponse, InternalServiceError, InvalidRequestException,
-            ResourceNotFoundException,
-        },
+        error::{AwsError, InvalidRequestException, ResourceNotFoundException},
         models::{PaginationToken, SecretId},
     },
     utils::date::datetime_to_f64,
 };
-use axum::response::{IntoResponse, Response};
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 use tokio::join;
@@ -85,7 +81,7 @@ impl Handler for ListSecretVersionIdsHandler {
     type Response = ListSecretVersionIdsResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, Response> {
+    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
         let ListSecretVersionIdsRequest {
             include_deprecated,
             max_results,
@@ -99,31 +95,24 @@ impl Handler for ListSecretVersionIdsHandler {
         let secret = get_secret_latest_version(db, &secret_id)
             .await
             //
-            .map_err(|error| {
-                tracing::error!(?error, "failed to get secret");
-                AwsErrorResponse(InternalServiceError).into_response()
-            })?
+            .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
             //
-            .ok_or_else(|| AwsErrorResponse(ResourceNotFoundException).into_response())?;
+            .ok_or(ResourceNotFoundException)?;
 
         let (limit, offset) = pagination_token
             .as_query_parts()
-            .ok_or_else(|| AwsErrorResponse(InvalidRequestException).into_response())?;
+            .ok_or(InvalidRequestException)?;
 
         let (versions, count) = join!(
             get_secret_versions_page(db, &secret.arn, include_deprecated, limit, offset),
             count_secret_versions(db, &secret.arn, include_deprecated),
         );
 
-        let versions = versions.map_err(|error| {
-            tracing::error!(?error, "failed to get versions");
-            AwsErrorResponse(InternalServiceError).into_response()
-        })?;
+        let versions =
+            versions.inspect_err(|error| tracing::error!(?error, "failed to get versions"))?;
 
-        let count = count.map_err(|error| {
-            tracing::error!(?error, "failed to get versions count");
-            AwsErrorResponse(InternalServiceError).into_response()
-        })?;
+        let count =
+            count.inspect_err(|error| tracing::error!(?error, "failed to get versions count"))?;
 
         let next_token = pagination_token
             .get_next_page(count)

@@ -1,6 +1,6 @@
 use crate::{
     handlers::error::{
-        AwsErrorResponse, IncompleteSignature, InternalServiceError, InvalidClientTokenId,
+        IncompleteSignature, InternalServiceError, IntoErrorResponse, InvalidClientTokenId,
         InvalidRequestException, MissingAuthenticationToken, SignatureDoesNotMatch,
     },
     utils::{
@@ -19,7 +19,7 @@ use axum::{
         Request,
         header::{AUTHORIZATION, ToStrError},
     },
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use chrono::Utc;
 use futures::future::BoxFuture;
@@ -89,12 +89,12 @@ where
                     Ok(value) => value,
                     // Invalid auth header
                     Err(_) => {
-                        return Ok(AwsErrorResponse(InvalidRequestException).into_response());
+                        return Ok(InvalidRequestException.into_error_response());
                     }
                 },
                 None => {
                     // Unauthorized missing header
-                    return Ok(AwsErrorResponse(MissingAuthenticationToken).into_response());
+                    return Ok(MissingAuthenticationToken.into_error_response());
                 }
             };
 
@@ -105,7 +105,7 @@ where
                         Ok(value) => value,
                         Err(_) => {
                             // Date header is invalid
-                            return Ok(AwsErrorResponse(InvalidRequestException).into_response());
+                            return Ok(InvalidRequestException.into_error_response());
                         }
                     };
 
@@ -113,7 +113,7 @@ where
                         Ok(value) => value,
                         Err(_) => {
                             // Date header is invalid
-                            return Ok(AwsErrorResponse(InvalidRequestException).into_response());
+                            return Ok(InvalidRequestException.into_error_response());
                         }
                     };
 
@@ -129,7 +129,7 @@ where
                         Ok(value) => value,
                         Err(_) => {
                             // Date header is invalid
-                            return Ok(AwsErrorResponse(InvalidRequestException).into_response());
+                            return Ok(InvalidRequestException.into_error_response());
                         }
                     };
 
@@ -137,7 +137,7 @@ where
                         Ok(value) => value,
                         Err(_) => {
                             // Date header is invalid
-                            return Ok(AwsErrorResponse(InvalidRequestException).into_response());
+                            return Ok(InvalidRequestException.into_error_response());
                         }
                     };
 
@@ -150,7 +150,7 @@ where
                 Some(value) => value,
                 None => {
                     // No date present on the request
-                    return Ok(AwsErrorResponse(InvalidRequestException).into_response());
+                    return Ok(InvalidRequestException.into_error_response());
                 }
             };
 
@@ -159,31 +159,31 @@ where
             if time_diff_now > 60 * 5 {
                 // Request date is not within the expected 5 minute tolerance window
                 // of the server time
-                return Ok(AwsErrorResponse(InvalidRequestException).into_response());
+                return Ok(InvalidRequestException.into_error_response());
             }
 
             let auth = match parse_auth_header(authorization) {
                 Ok(value) => value,
                 Err(_) => {
-                    return Ok(AwsErrorResponse(IncompleteSignature).into_response());
+                    return Ok(IncompleteSignature.into_error_response());
                 }
             };
 
             // Missing the aws4_request portion of the credential
             if auth.signing_scope.aws4_request != "aws4_request" {
-                return Ok(AwsErrorResponse(IncompleteSignature).into_response());
+                return Ok(IncompleteSignature.into_error_response());
             }
 
             if auth.signing_scope.access_key_id != credential.access_key_id() {
                 // Invalid access key
-                return Ok(AwsErrorResponse(InvalidClientTokenId).into_response());
+                return Ok(InvalidClientTokenId.into_error_response());
             }
 
             let body = match body.collect().await {
                 Ok(value) => value.to_bytes(),
                 Err(_) => {
                     // Failed to ready body
-                    return Ok(AwsErrorResponse(InvalidRequestException).into_response());
+                    return Ok(InvalidRequestException.into_error_response());
                 }
             };
 
@@ -191,7 +191,7 @@ where
             let time = match chrono_to_system_time(date) {
                 Some(value) => value,
                 None => {
-                    return Ok(AwsErrorResponse(InvalidRequestException).into_response());
+                    return Ok(InvalidRequestException.into_error_response());
                 }
             };
 
@@ -208,7 +208,7 @@ where
             {
                 Ok(value) => value.into(),
                 Err(_error) => {
-                    return Ok(AwsErrorResponse(InternalServiceError).into_response());
+                    return Ok(InternalServiceError.into_error_response());
                 }
             };
 
@@ -228,7 +228,7 @@ where
                     }) {
                     Ok(value) => value,
                     Err(_error) => {
-                        return Ok(AwsErrorResponse(InvalidRequestException).into_response());
+                        return Ok(InvalidRequestException.into_error_response());
                     }
                 };
 
@@ -242,7 +242,7 @@ where
                 Ok(value) => value,
                 Err(_error) => {
                     //
-                    return Ok(AwsErrorResponse(InvalidRequestException).into_response());
+                    return Ok(InvalidRequestException.into_error_response());
                 }
             };
 
@@ -250,13 +250,13 @@ where
                 Ok(value) => value.into_parts(),
                 Err(_error) => {
                     //
-                    return Ok(AwsErrorResponse(InternalServiceError).into_response());
+                    return Ok(InternalServiceError.into_error_response());
                 }
             };
 
             if signature != auth.signature {
                 // Verify failure, bad signature
-                return Ok(AwsErrorResponse(SignatureDoesNotMatch).into_response());
+                return Ok(SignatureDoesNotMatch.into_error_response());
             }
 
             // Re-create the body since we consumed the previous one

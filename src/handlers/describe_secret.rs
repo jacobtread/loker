@@ -5,12 +5,11 @@ use crate::{
     },
     handlers::{
         Handler,
-        error::{AwsErrorResponse, InternalServiceError, ResourceNotFoundException},
+        error::{AwsError, ResourceNotFoundException},
         models::{SecretId, Tag},
     },
     utils::date::datetime_to_f64,
 };
-use axum::response::{IntoResponse, Response};
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -70,29 +69,19 @@ impl Handler for DescribeSecretHandler {
     type Response = DescribeSecretResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, Response> {
+    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
 
-        let secret = match get_secret_latest_version(db, &secret_id).await {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::error!(?error, "failed to get secret");
-                return Err(AwsErrorResponse(InternalServiceError).into_response());
-            }
-        };
+        let secret = get_secret_latest_version(db, &secret_id)
+            .await
+            //
+            .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
+            //
+            .ok_or(ResourceNotFoundException)?;
 
-        let secret = match secret {
-            Some(value) => value,
-            None => return Err(AwsErrorResponse(ResourceNotFoundException).into_response()),
-        };
-
-        let versions = match get_secret_versions(db, &secret.arn).await {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::error!(?error, "failed to get secret versions");
-                return Err(AwsErrorResponse(InternalServiceError).into_response());
-            }
-        };
+        let versions = get_secret_versions(db, &secret.arn)
+            .await
+            .inspect_err(|error| tracing::error!(?error, "failed to get secret versions"))?;
 
         let most_recently_used = versions
             .iter()

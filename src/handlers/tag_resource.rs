@@ -5,11 +5,10 @@ use crate::{
     },
     handlers::{
         Handler,
-        error::{AwsErrorResponse, InternalServiceError, ResourceNotFoundException},
+        error::{AwsError, ResourceNotFoundException},
         models::{SecretId, Tag},
     },
 };
-use axum::response::IntoResponse;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 use std::ops::DerefMut;
@@ -36,53 +35,30 @@ impl Handler for TagResourceHandler {
     type Response = TagResourceResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(
-        db: &DbPool,
-        request: Self::Request,
-    ) -> Result<Self::Response, axum::response::Response> {
+    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
         let tags = request.tags;
 
-        let secret = match get_secret_latest_version(db, &secret_id).await {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::error!(?error, "failed to get secret");
-                return Err(AwsErrorResponse(InternalServiceError).into_response());
-            }
-        };
+        let secret = get_secret_latest_version(db, &secret_id)
+            .await
+            .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
+            .ok_or(ResourceNotFoundException)?;
 
-        let secret = match secret {
-            Some(value) => value,
-            None => return Err(AwsErrorResponse(ResourceNotFoundException).into_response()),
-        };
-
-        let mut t = match db.begin().await {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::error!(?error, "failed to begin transaction");
-                return Err(AwsErrorResponse(InternalServiceError).into_response());
-            }
-        };
+        let mut t = db
+            .begin()
+            .await
+            .inspect_err(|error| tracing::error!(?error, "failed to begin transaction"))?;
 
         // Attach all the secrets
         for tag in tags {
-            if let Err(error) =
-                put_secret_tag(t.deref_mut(), &secret.arn, &tag.key, &tag.value).await
-            {
-                // Rollback the transaction on failure
-                if let Err(error) = t.rollback().await {
-                    tracing::error!(?error, "failed to rollback transaction");
-                }
-
-                tracing::error!(?error, "failed to set secret tag");
-                return Err(AwsErrorResponse(InternalServiceError).into_response());
-            }
+            put_secret_tag(t.deref_mut(), &secret.arn, &tag.key, &tag.value)
+                .await
+                .inspect_err(|error| tracing::error!(?error, "failed to set secret tag"))?;
         }
 
-        if let Err(error) = t.commit().await {
-            tracing::error!(?error, "failed to commit transaction");
-            return Err(AwsErrorResponse(InternalServiceError).into_response());
-        }
+        t.commit()
+            .await
+            .inspect_err(|error| tracing::error!(?error, "failed to commit transaction"))?;
 
         Ok(TagResourceResponse {})
     }

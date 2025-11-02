@@ -8,15 +8,11 @@ use crate::{
     },
     handlers::{
         Handler,
-        error::{
-            AwsError, AwsErrorResponse, InternalServiceError, InvalidRequestException,
-            ResourceNotFoundException,
-        },
+        error::{AwsError, IntoErrorResponse, InvalidRequestException, ResourceNotFoundException},
         models::{APIErrorType, Filter, PaginationToken},
     },
     utils::date::datetime_to_f64,
 };
-use axum::response::{IntoResponse, Response};
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 use tokio::join;
@@ -87,7 +83,7 @@ impl Handler for BatchGetSecretValueHandler {
     type Response = BatchGetSecretValueResponse;
 
     #[tracing::instrument(skip_all)]
-    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, Response> {
+    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
         let mut errors: Vec<APIErrorType> = Vec::new();
         let mut secret_values: Vec<SecretValueEntry> = Vec::new();
         let mut next_token: Option<String> = None;
@@ -104,22 +100,18 @@ impl Handler for BatchGetSecretValueHandler {
 
                 let (limit, offset) = pagination_token
                     .as_query_parts()
-                    .ok_or_else(|| AwsErrorResponse(InvalidRequestException).into_response())?;
+                    .ok_or(InvalidRequestException)?;
 
                 let (secrets, count) = join!(
                     get_secrets_by_filter(db, &filters, false, limit, offset, false),
                     get_secrets_count_by_filter(db, &filters, false),
                 );
 
-                let secrets = secrets.map_err(|error| {
-                    tracing::error!(?error, "failed to get secrets");
-                    AwsErrorResponse(InternalServiceError).into_response()
-                })?;
+                let secrets = secrets
+                    .inspect_err(|error| tracing::error!(?error, "failed to get secrets"))?;
 
-                let count = count.map_err(|error| {
-                    tracing::error!(?error, "failed to get secrets count");
-                    AwsErrorResponse(InternalServiceError).into_response()
-                })?;
+                let count = count
+                    .inspect_err(|error| tracing::error!(?error, "failed to get secrets count"))?;
 
                 next_token = pagination_token
                     .get_next_page(count)
@@ -141,33 +133,29 @@ impl Handler for BatchGetSecretValueHandler {
             // Finding secrets from a list of ARNs / names
             (None, Some(secret_id_list)) => {
                 for secret_id in secret_id_list {
-                    let secret = match get_secret_latest_version(db, &secret_id).await {
-                        Ok(value) => value,
-                        Err(error) => {
+                    let secret = get_secret_latest_version(db, &secret_id)
+                        .await
+                        .inspect_err(|error| {
                             tracing::error!(?error, %secret_id, "failed to load secret");
-                            return Err(AwsErrorResponse(InternalServiceError).into_response());
-                        }
-                    };
+                        })?;
 
                     let secret = match secret {
                         Some(value) => value,
                         None => {
                             errors.push(APIErrorType {
-                                error_code: Some(ResourceNotFoundException::TYPE.to_string()),
-                                message: Some(ResourceNotFoundException::MESSAGE.to_string()),
+                                error_code: Some(ResourceNotFoundException.type_name().to_string()),
+                                message: Some(ResourceNotFoundException.to_string()),
                                 secret_id: Some(secret_id),
                             });
                             continue;
                         }
                     };
 
-                    if let Err(error) =
-                        update_secret_version_last_accessed(db, &secret.arn, &secret.version_id)
-                            .await
-                    {
-                        tracing::error!(?error, name = %secret.name, "failed to update secret last accessed");
-                        return Err(AwsErrorResponse(InternalServiceError).into_response());
-                    }
+                    update_secret_version_last_accessed(db, &secret.arn, &secret.version_id)
+                        .await
+                        .inspect_err(|error| {
+                            tracing::error!(?error, name = %secret.name, "failed to update secret last accessed")
+                        })?;
 
                     secret_values.push(SecretValueEntry {
                         arn: secret.arn,
@@ -184,7 +172,7 @@ impl Handler for BatchGetSecretValueHandler {
             // Must only specify one or the other and not both
             // and cannot pick neither
             (Some(_), Some(_)) | (None, None) => {
-                return Err(AwsErrorResponse(InvalidRequestException).into_response());
+                return Err(InvalidRequestException.into());
             }
         }
 

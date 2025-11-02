@@ -2,10 +2,9 @@ use crate::{
     database::DbPool,
     handlers::{
         Handler,
-        error::{AwsErrorResponse, InvalidRequestException},
+        error::{AwsError, InvalidRequestException},
     },
 };
-use axum::response::{IntoResponse, Response};
 use garde::Validate;
 use rand::seq::{IndexedRandom, SliceRandom};
 use serde::{Deserialize, Serialize};
@@ -67,7 +66,7 @@ impl Handler for GetRandomPasswordHandler {
     type Response = GetRandomPasswordResponse;
 
     #[tracing::instrument(skip_all)]
-    async fn handle(_db: &DbPool, request: Self::Request) -> Result<Self::Response, Response> {
+    async fn handle(_db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
         let GetRandomPasswordRequest {
             exclude_characters,
             exclude_lowercase,
@@ -79,7 +78,7 @@ impl Handler for GetRandomPasswordHandler {
             require_each_included_type,
         } = request;
 
-        let random_password = match get_random_password(PasswordOptions {
+        let random_password = get_random_password(PasswordOptions {
             exclude_characters,
             exclude_lowercase,
             exclude_numbers,
@@ -88,12 +87,8 @@ impl Handler for GetRandomPasswordHandler {
             include_space,
             password_length: password_length as usize,
             require_each_included_type,
-        }) {
-            Ok(value) => value,
-            Err(_error) => {
-                return Err(AwsErrorResponse(InvalidRequestException).into_response());
-            }
-        };
+        })
+        .map_err(|_| InvalidRequestException)?;
 
         Ok(GetRandomPasswordResponse { random_password })
     }

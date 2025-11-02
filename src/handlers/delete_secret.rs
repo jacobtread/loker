@@ -5,12 +5,11 @@ use crate::{
     },
     handlers::{
         Handler,
-        error::{AwsErrorResponse, InternalServiceError, ResourceNotFoundException},
+        error::{AwsError, ResourceNotFoundException},
         models::SecretId,
     },
     utils::date::datetime_to_f64,
 };
-use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
@@ -54,7 +53,7 @@ impl Handler for DeleteSecretHandler {
     type Response = DeleteSecretResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, Response> {
+    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
         let DeleteSecretRequest {
             force_delete_without_recovery,
             recovery_window_in_days,
@@ -63,18 +62,12 @@ impl Handler for DeleteSecretHandler {
 
         let SecretId(secret_id) = secret_id;
 
-        let secret = match get_secret_latest_version(db, &secret_id).await {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::error!(?error, "failed to get secret");
-                return Err(AwsErrorResponse(InternalServiceError).into_response());
-            }
-        };
-
-        let secret = match secret {
-            Some(value) => value,
-            None => return Err(AwsErrorResponse(ResourceNotFoundException).into_response()),
-        };
+        let secret = get_secret_latest_version(db, &secret_id)
+            .await
+            //
+            .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
+            //
+            .ok_or(ResourceNotFoundException)?;
 
         // Secret is already scheduled for deletion
         if let Some(scheduled_deletion_date) = secret.scheduled_delete_at {
@@ -86,21 +79,18 @@ impl Handler for DeleteSecretHandler {
         }
 
         let deletion_date = if force_delete_without_recovery {
-            if let Err(error) = delete_secret(db, &secret.arn).await {
-                tracing::error!(?error, "failed to delete secret");
-                return Err(AwsErrorResponse(InternalServiceError).into_response());
-            }
+            delete_secret(db, &secret.arn)
+                .await
+                .inspect_err(|error| tracing::error!(?error, "failed to delete secret"))?;
 
             // Secret has been deleted
             Utc::now()
         } else {
-            match schedule_delete_secret(db, &secret.arn, recovery_window_in_days).await {
-                Ok(value) => value,
-                Err(error) => {
+            schedule_delete_secret(db, &secret.arn, recovery_window_in_days)
+                .await
+                .inspect_err(|error| {
                     tracing::error!(?error, "failed to mark secret for deletion");
-                    return Err(AwsErrorResponse(InternalServiceError).into_response());
-                }
-            }
+                })?
         };
 
         Ok(DeleteSecretResponse {
