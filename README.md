@@ -77,6 +77,68 @@ services:
             # - ./certs:/certs
 ```
 
+## AWS SDK
+
+To use with the AWS Secrets Manager SDK configure your SDK config like the following
+
+### Rust
+
+The following snippet is an example for using **Loker** with the `aws-sdk-secretsmanager` crate:
+
+```rust
+use aws_config::{BehaviorVersion, Region, SdkConfig};
+use aws_sdk_secretsmanager::config::{Credentials, SharedCredentialsProvider};
+
+// Update credentials to match your environment variables
+let credentials = Credentials::new(
+    "ACCESS_KEY_ID",
+    "ACCESS_KEY_SECRET",
+    None,
+    None,
+    "sm-credentials",
+);
+
+// Adjust endpoint to match your Loker server
+let endpoint_url = "http://localhost:8008";
+let sdk_config = SdkConfig::builder()
+    .behavior_version(BehaviorVersion::latest())
+    .region(Region::from_static("us-east-1"))
+    .endpoint_url(endpoint_url)
+    .credentials_provider(SharedCredentialsProvider::new(credentials))
+    .build()
+
+// Construct the client
+let client = aws_sdk_secretsmanager::Client::new(&sdk_config);
+
+// ...Use the client as normal
+```
+
+### JavaScript / TypeScript
+
+The following snippet is an example for using **Loker** with the `@aws-sdk/client-secrets-manager` npm package:
+
+```js
+import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+
+// Update credentials to match your environment variables
+const credentials = {
+    accessKeyId: "ACCESS_KEY_ID",
+    secretAccessKey: "ACCESS_KEY_SECRET",
+};
+
+// Adjust endpoint to match your Loker server
+const endpoint = "http://localhost:8080";
+
+// Construct the client
+const client = new SecretsManagerClient({
+    region: "us-east-1",
+    endpoint,
+    credentials,
+});
+
+// ...Use the client as normal
+```
+
 ## Environment Variables
 
 | Name                      | Required                                           | Description                                            |
