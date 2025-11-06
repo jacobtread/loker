@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use axum::{Extension, Router, routing::post_service};
 use loker::{
     database::{DbPool, initialize_database},
@@ -23,19 +25,18 @@ pub fn test_sdk_config(endpoint_url: &str, credentials: Credentials) -> SdkConfi
 
 #[allow(dead_code)]
 pub struct TestServer {
-    sdk_config: SdkConfig,
     pub db: DbPool,
-    handle: AbortHandle,
+    pub abort_handle: AbortHandle,
 }
 
 impl Drop for TestServer {
     fn drop(&mut self) {
-        self.handle.abort();
+        self.abort_handle.abort();
     }
 }
 
 #[allow(dead_code)]
-async fn memory_database() -> DbPool {
+pub async fn test_memory_database() -> DbPool {
     let pool = SqlitePoolOptions::new()
         .after_connect(move |connection, _metadata| {
             Box::pin(async move {
@@ -55,14 +56,9 @@ async fn memory_database() -> DbPool {
 }
 
 #[allow(dead_code)]
-pub async fn test_server() -> (aws_sdk_secretsmanager::Client, TestServer) {
+pub async fn start_test_server(db: DbPool, credentials: Credentials) -> (SocketAddr, AbortHandle) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let db = memory_database().await;
     let server_address = listener.local_addr().unwrap();
-    let harness_db = db.clone();
-
-    let credentials = Credentials::for_tests();
-    let credentials_client_copy = credentials.clone();
 
     let abort_handle = tokio::spawn(async move {
         let handlers = handlers::create_handlers();
@@ -70,24 +66,24 @@ pub async fn test_server() -> (aws_sdk_secretsmanager::Client, TestServer) {
         let app = Router::new()
             .route_service("/", post_service(handlers_service))
             .layer(AwsSigV4AuthLayer::new(credentials))
-            .layer(Extension(db.clone()));
+            .layer(Extension(db));
 
         axum::serve(listener, app).await.unwrap();
     })
     .abort_handle();
 
-    let sdk_config = test_sdk_config(
-        &format!("http://{server_address}/"),
-        credentials_client_copy,
-    );
+    (server_address, abort_handle)
+}
+
+#[allow(dead_code)]
+pub async fn test_server() -> (aws_sdk_secretsmanager::Client, TestServer) {
+    let db = test_memory_database().await;
+    let credentials = Credentials::for_tests();
+
+    let (server_address, abort_handle) = start_test_server(db.clone(), credentials.clone()).await;
+
+    let sdk_config = test_sdk_config(&format!("http://{server_address}/"), credentials);
     let client = aws_sdk_secretsmanager::Client::new(&sdk_config);
 
-    (
-        client,
-        TestServer {
-            sdk_config,
-            handle: abort_handle,
-            db: harness_db,
-        },
-    )
+    (client, TestServer { abort_handle, db })
 }
