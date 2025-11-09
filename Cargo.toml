@@ -20,7 +20,7 @@ tower = { version = "=0.5.2" }
 tower-http = { version = "=0.6.6", features = ["limit", "cors", "trace"] }
 
 # Crypto provider
-rustls = { version = "=0.23.33", features = ["aws-lc-rs"] }
+rustls = { version = "=0.23.35", features = ["aws-lc-rs"] }
 
 # Async runtime and future utils
 tokio = { version = "=1.48.0", features = ["full"] }
@@ -61,11 +61,11 @@ tokio-simple-fixed-scheduler = "=0.1.0"
 
 # AWS SigV4 signing and credentials types
 aws-sigv4 = "=1.3.6"
-aws-credential-types = "=1.2.8"
+aws-credential-types = "=1.2.9"
 
 [dev-dependencies]
-aws-config = { version = "=1.8.8", features = ["behavior-version-latest"] }
-aws-sdk-secretsmanager = "=1.90.0"
+aws-config = { version = "=1.8.10", features = ["behavior-version-latest"] }
+aws-sdk-secretsmanager = "=1.93.0"
 
 # The profile that 'dist' will build with
 [profile.dist]
