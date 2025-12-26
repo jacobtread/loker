@@ -104,7 +104,7 @@ async fn health() -> StatusCode {
 /// Serve the app over HTTPS
 async fn serve_https(
     app: Router,
-    handle: axum_server::Handle,
+    handle: axum_server::Handle<SocketAddr>,
     server_address: SocketAddr,
     certificate_path: String,
     private_key_path: String,
@@ -136,7 +136,7 @@ async fn serve_https(
 /// Serve the app over HTTP
 async fn serve_http(
     app: Router,
-    handle: axum_server::Handle,
+    handle: axum_server::Handle<SocketAddr>,
     server_address: SocketAddr,
 ) -> Result<(), Box<dyn Error>> {
     axum_server::bind(server_address)
