@@ -1,7 +1,7 @@
 [package]
 name = "loker"
 description = "Self-hosted AWS secrets manager compatible server"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 readme = "README.md"
 license = "MIT"
