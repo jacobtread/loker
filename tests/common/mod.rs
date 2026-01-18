@@ -16,7 +16,7 @@ use tokio::task::AbortHandle;
 #[allow(dead_code)]
 pub fn test_sdk_config(endpoint_url: &str, credentials: Credentials) -> SdkConfig {
     SdkConfig::builder()
-        .behavior_version(BehaviorVersion::v2025_08_07())
+        .behavior_version(BehaviorVersion::v2026_01_12())
         .region(Region::from_static("us-east-1"))
         .endpoint_url(endpoint_url)
         .credentials_provider(SharedCredentialsProvider::new(credentials))
