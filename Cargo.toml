@@ -27,7 +27,7 @@ tokio = { version = "=1.49.0", features = ["full"] }
 futures = "=0.3.31"
 
 # Error helper
-thiserror = "=2.0.17"
+thiserror = "=2.0.18"
 
 # Tracing
 tracing = "=0.1.44"
@@ -41,14 +41,14 @@ serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
 
 # UUID v4
-uuid = { version = "=1.19.0", features = ["v4", "serde"] }
+uuid = { version = "=1.20.0", features = ["v4", "serde"] }
 
 # Database (With SLQCipher)
 sqlx = { version = "=0.8.6", features = ["sqlite", "runtime-tokio", "chrono"] }
 libsqlite3-sys = { version ="=0.30.1", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 # Precise date and time implementation
-chrono = { version = "=0.4.42", features = ["serde"] }
+chrono = { version = "=0.4.43", features = ["serde"] }
 
 # Random generation
 rand = "=0.9.2"
