@@ -14,7 +14,7 @@ use crate::{
     },
 };
 use garde::Validate;
-use rand::{Rng, distr::Alphanumeric};
+use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use std::ops::DerefMut;
 
