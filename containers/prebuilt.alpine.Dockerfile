@@ -1,5 +1,5 @@
-# Hardened Alpine Base imae
-FROM dhi.io/alpine-base:3.23
+# Alpine builder image
+FROM alpine:3.23 AS builder
 
 # Github release version
 ARG GITHUB_RELEASE_VERSION
@@ -27,7 +27,14 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
     && tar xf "/app/loker.tar.xz" --strip-components 1 -C "/app/loker-unpacked" \
     && mv /app/loker-unpacked/loker /app/loker \
     && chmod +x /app/loker \
-    && rm -rf /app/loker-unpacked /app/locker.tar
+    && rm -rf /app/loker-unpacked /app/locker.tar.xz
+
+# Hardened Alpine Base imae
+FROM dhi.io/alpine-base:3.23
+
+WORKDIR /app
+
+COPY --from=builder /app/loker /app/loker
 
 EXPOSE 8080
 

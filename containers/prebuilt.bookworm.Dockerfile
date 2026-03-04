@@ -1,5 +1,5 @@
-# Hardened Debian Base image
-FROM dhi.io/debian-base:trixie
+# Debian builder image
+FROM debian:trixie AS builder
 
 # Github release version
 ARG GITHUB_RELEASE_VERSION
@@ -29,8 +29,15 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
     && tar xf "/app/loker.tar.xz" --strip-components 1 -C "/app/loker-unpacked" \
     && mv /app/loker-unpacked/loker /app/loker \
     && chmod +x /app/loker \
-    && rm -rf /app/loker-unpacked /app/locker.tar
+    && rm -rf /app/loker-unpacked /app/locker.tar.xz
 
+
+# Hardened Debian Base runner image
+FROM dhi.io/debian-base:trixie
+
+WORKDIR /app
+
+COPY --from=builder /app/loker /app/loker
 
 EXPOSE 8080
 
