@@ -1,4 +1,5 @@
-FROM debian:bookworm-slim
+# Hardened Debian Base image
+FROM dhi.io/debian-base:trixie
 
 # Github release version
 ARG GITHUB_RELEASE_VERSION

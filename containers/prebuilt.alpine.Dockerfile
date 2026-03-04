@@ -1,4 +1,5 @@
-FROM alpine
+# Hardened Alpine Base imae
+FROM dhi.io/alpine-base:3.23
 
 # Github release version
 ARG GITHUB_RELEASE_VERSION

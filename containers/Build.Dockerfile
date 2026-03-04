@@ -1,7 +1,7 @@
 # ----------------------------------------
 #  Builder part
 # ----------------------------------------
-FROM rust:1.90.0-slim-bullseye AS builder
+FROM rust:1.93.1-trixie-bookworm AS builder
 
 WORKDIR /app
 
@@ -41,7 +41,7 @@ RUN cargo build --release
 # ----------------------------------------
 # Runner part
 # ----------------------------------------
-FROM debian:bullseye-slim AS runner
+FROM dhi.io/debian-base:trixie AS runner
 
 WORKDIR /app
 
