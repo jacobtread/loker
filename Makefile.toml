@@ -17,7 +17,7 @@ args = [
     "GITHUB_RELEASE_VERSION=${RELEASE_VERSION}",
 ]
 
-[tasks.docker-publish-bookworm]
+[tasks.docker-publish-debian]
 command = "docker"
 args = [
     "buildx",
@@ -25,15 +25,15 @@ args = [
     "--platform",
     "linux/amd64,linux/arm64",
     "-t",
-    "jacobtread/loker:${RELEASE_VERSION}-bookworm-prebuilt",
+    "jacobtread/loker:${RELEASE_VERSION}-debian-prebuilt",
     "-t",
-    "jacobtread/loker:latest-bookworm-prebuilt",
+    "jacobtread/loker:latest-debian-prebuilt",
     "-t",
     "jacobtread/loker:${RELEASE_VERSION}",
     "-t",
     "jacobtread/loker:latest",
     "-f",
-    "./containers/prebuilt.bookworm.Dockerfile",
+    "./containers/prebuilt.debian.Dockerfile",
     "--push",
     ".",
     "--build-arg",

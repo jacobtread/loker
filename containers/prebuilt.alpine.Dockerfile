@@ -29,10 +29,14 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
     && chmod +x /app/loker \
     && rm -rf /app/loker-unpacked /app/locker.tar.xz
 
-# Hardened Alpine Base imae
-FROM dhi.io/alpine-base:3.23
+# Alpine runner image
+FROM alpine:3.23
 
 WORKDIR /app
+
+ENV SM_DATABASE_PATH=/data/secrets.db
+
+VOLUME ["/data"]
 
 COPY --from=builder /app/loker /app/loker
 

@@ -32,10 +32,14 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
     && rm -rf /app/loker-unpacked /app/locker.tar.xz
 
 
-# Hardened Debian Base runner image
-FROM dhi.io/debian-base:trixie
+# Debian runner image
+FROM debian:trixie
 
 WORKDIR /app
+
+ENV SM_DATABASE_PATH=/data/secrets.db
+
+VOLUME ["/data"]
 
 COPY --from=builder /app/loker /app/loker
 
