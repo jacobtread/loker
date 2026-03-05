@@ -1,5 +1,5 @@
 # Debian builder image
-FROM debian:trixie AS builder
+FROM debian:trixie-slim AS builder
 
 # Github release version
 ARG GITHUB_RELEASE_VERSION
@@ -33,7 +33,7 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
 
 
 # Debian runner image
-FROM debian:trixie
+FROM debian:trixie-slim
 
 WORKDIR /app
 
