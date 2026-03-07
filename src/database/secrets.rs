@@ -925,26 +925,21 @@ pub async fn count_secret_versions(
     secret_arn: &str,
     include_deprecated: bool,
 ) -> DbResult<i64> {
-    let (count,): (i64,) = sqlx::query_as(if include_deprecated {
+    let (count,): (i64,) = sqlx::query_as(
         r#"
            SELECT COUNT(*)
            FROM "secrets_versions" "secret_version"
-           WHERE "secret_version"."secret_arn" = ?
-       "#
-    } else {
-        r#"
-           SELECT COUNT(*)
-           FROM "secrets_versions" "secret_version"
-           WHERE "secret_version"."secret_arn" = ?
-               AND EXISTS (
+           WHERE "secret_version"."secret_arn" = ? AND
+               (? = TRUE OR EXISTS (
                    SELECT 1
                    FROM "secret_version_stages" "version_stage"
                    WHERE "version_stage"."secret_arn" = "secret_version"."secret_arn"
                        AND "version_stage"."version_id" = "secret_version"."version_id"
-               )
-       "#
-    })
+               ))
+       "#,
+    )
     .bind(secret_arn)
+    .bind(include_deprecated)
     .fetch_one(db)
     .await?;
 
@@ -962,7 +957,7 @@ pub async fn get_secret_versions_page(
     limit: i64,
     offset: i64,
 ) -> DbResult<Vec<SecretVersion>> {
-    sqlx::query_as(if include_deprecated {
+    sqlx::query_as(
         r#"
             SELECT
                 "secret_version".*,
@@ -973,33 +968,19 @@ pub async fn get_secret_versions_page(
                         AND "version_stage"."version_id" = "secret_version"."version_id"
                 ), '[]') AS "version_stages"
             FROM "secrets_versions" "secret_version"
-            WHERE "secret_version"."secret_arn" = ?
+            WHERE "secret_version"."secret_arn" = ? AND
+                (? = TRUE OR EXISTS (
+                    SELECT 1
+                    FROM "secret_version_stages" "version_stage"
+                    WHERE "version_stage"."secret_arn" = "secret_version"."secret_arn"
+                        AND "version_stage"."version_id" = "secret_version"."version_id"
+                ))
             ORDER BY "secret_version"."created_at" DESC
             LIMIT ? OFFSET ?
-        "#
-    } else {
-        r#"
-                SELECT
-                    "secret_version".*,
-                    COALESCE((
-                        SELECT json_group_array("version_stage"."value")
-                        FROM "secret_version_stages" "version_stage"
-                        WHERE "version_stage"."secret_arn" = "secret_version"."secret_arn"
-                            AND "version_stage"."version_id" = "secret_version"."version_id"
-                    ), '[]') AS "version_stages"
-                FROM "secrets_versions" "secret_version"
-                WHERE "secret_version"."secret_arn" = ?
-                    AND EXISTS (
-                        SELECT 1
-                        FROM "secret_version_stages" "version_stage"
-                        WHERE "version_stage"."secret_arn" = "secret_version"."secret_arn"
-                            AND "version_stage"."version_id" = "secret_version"."version_id"
-                    )
-                ORDER BY "secret_version"."created_at" DESC
-                LIMIT ? OFFSET ?
-            "#
-    })
+        "#,
+    )
     .bind(secret_arn)
+    .bind(include_deprecated)
     .bind(limit)
     .bind(offset)
     .fetch_all(db)
