@@ -15,13 +15,13 @@ const MIGRATIONS_SETUP_SQL: &str = include_str!("./m0_create_migrations_table.sq
 /// Structure for tracking migrations applied to the root
 #[derive(Debug, Clone, FromRow, Serialize)]
 struct Migration {
-    pub name: String,
-    pub applied_at: DateTime<Utc>,
+    name: String,
+    applied_at: DateTime<Utc>,
 }
 
 struct CreateMigration {
-    pub name: String,
-    pub applied_at: DateTime<Utc>,
+    name: String,
+    applied_at: DateTime<Utc>,
 }
 
 /// Create a new tenant migration
