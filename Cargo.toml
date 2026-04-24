@@ -65,7 +65,10 @@ aws-credential-types = "=1.2.14"
 
 [dev-dependencies]
 aws-config = { version = "=1.8.16", features = ["behavior-version-latest"] }
-aws-sdk-secretsmanager = "=1.104.0"
+aws-sdk-secretsmanager = { version = "=1.104.0", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
 
 # The profile that 'dist' will build with
 [profile.dist]
