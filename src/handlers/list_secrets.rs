@@ -1,8 +1,5 @@
 use crate::{
-    database::{
-        DbPool,
-        secrets::{get_secrets_by_filter, get_secrets_count_by_filter},
-    },
+    database::secrets::{get_secrets_by_filter, get_secrets_count_by_filter},
     handlers::{
         Handler,
         error::{AwsError, InvalidRequestException},
@@ -13,7 +10,7 @@ use crate::{
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tokio::join;
+use tokio_rusqlite::Connection;
 
 // https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_ListSecrets.html
 pub struct ListSecretsHandler;
@@ -126,7 +123,7 @@ impl Handler for ListSecretsHandler {
     type Response = ListSecretsResponse;
 
     #[tracing::instrument(skip_all)]
-    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
         let ListSecretsRequest {
             filters,
             include_planned_deletion,
@@ -142,16 +139,25 @@ impl Handler for ListSecretsHandler {
             .as_query_parts()
             .ok_or(InvalidRequestException)?;
 
-        let (secrets, count) = join!(
-            get_secrets_by_filter(db, &filters, include_planned_deletion, limit, offset, asc),
-            get_secrets_count_by_filter(db, &filters, include_planned_deletion),
-        );
-
-        let secrets =
-            secrets.inspect_err(|error| tracing::error!(?error, "failed to get secrets"))?;
-
-        let count =
-            count.inspect_err(|error| tracing::error!(?error, "failed to get secrets count"))?;
+        let (secrets, count) = db
+            .call(move |db| {
+                Ok::<_, AwsError>((
+                    get_secrets_by_filter(
+                        db,
+                        &filters,
+                        include_planned_deletion,
+                        limit,
+                        offset,
+                        asc,
+                    )
+                    .inspect_err(|error| tracing::error!(?error, "failed to get secrets"))?,
+                    get_secrets_count_by_filter(db, &filters, include_planned_deletion)
+                        .inspect_err(|error| {
+                            tracing::error!(?error, "failed to get secrets count")
+                        })?,
+                ))
+            })
+            .await?;
 
         let next_token = pagination_token
             .get_next_page(count)

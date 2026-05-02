@@ -139,6 +139,15 @@ pub enum AwsError {
     InternalServiceError(#[from] InternalServiceError),
 }
 
+impl<E: Into<AwsError>> From<tokio_rusqlite::Error<E>> for AwsError {
+    fn from(value: tokio_rusqlite::Error<E>) -> Self {
+        match value {
+            tokio_rusqlite::Error::Error(err) => err.into(),
+            _ => AwsError::InternalServiceError(InternalServiceError),
+        }
+    }
+}
+
 // Database errors can be turned directly into [InternalServiceError]
 impl From<DbErr> for AwsError {
     fn from(_value: DbErr) -> Self {

@@ -24,6 +24,11 @@
     "Timelike",
     "ASCTIME",
     "FIXDATE",
-    "nanos"
+    "nanos",
+    "rusqlite",
+    "itertools"
+  ],
+  "userWords": [
+    "From<tokio_rusqlite::Error<E>>"
   ]
 }

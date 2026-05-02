@@ -1,7 +1,6 @@
 use crate::{
-    database::{
-        DbPool,
-        secrets::{count_secret_versions, get_secret_latest_version, get_secret_versions_page},
+    database::secrets::{
+        count_secret_versions, get_secret_latest_version, get_secret_versions_page,
     },
     handlers::{
         Handler,
@@ -12,7 +11,7 @@ use crate::{
 };
 use garde::Validate;
 use serde::{Deserialize, Serialize};
-use tokio::join;
+use tokio_rusqlite::Connection;
 
 // https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_ListSecretVersionIds.html
 pub struct ListSecretVersionIdsHandler;
@@ -81,7 +80,7 @@ impl Handler for ListSecretVersionIdsHandler {
     type Response = ListSecretVersionIdsResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
         let ListSecretVersionIdsRequest {
             include_deprecated,
             max_results,
@@ -92,31 +91,32 @@ impl Handler for ListSecretVersionIdsHandler {
         let SecretId(secret_id) = secret_id;
         let pagination_token = next_token.page_size(max_results);
 
-        let secret = get_secret_latest_version(db, &secret_id)
-            .await
-            //
-            .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
-            //
-            .ok_or(ResourceNotFoundException)?;
+        let (secret, versions, next_token) = db
+            .call(move |db| {
+                let secret = get_secret_latest_version(db, &secret_id)
+                    //
+                    .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
+                    //
+                    .ok_or(ResourceNotFoundException)?;
 
-        let (limit, offset) = pagination_token
-            .as_query_parts()
-            .ok_or(InvalidRequestException)?;
+                let (limit, offset) = pagination_token
+                    .as_query_parts()
+                    .ok_or(InvalidRequestException)?;
 
-        let (versions, count) = join!(
-            get_secret_versions_page(db, &secret.arn, include_deprecated, limit, offset),
-            count_secret_versions(db, &secret.arn, include_deprecated),
-        );
+                let versions =
+                    get_secret_versions_page(db, &secret.arn, include_deprecated, limit, offset)
+                        .inspect_err(|error| tracing::error!(?error, "failed to get versions"))?;
 
-        let versions =
-            versions.inspect_err(|error| tracing::error!(?error, "failed to get versions"))?;
+                let count = count_secret_versions(db, &secret.arn, include_deprecated)
+                    .inspect_err(|error| tracing::error!(?error, "failed to get versions count"))?;
 
-        let count =
-            count.inspect_err(|error| tracing::error!(?error, "failed to get versions count"))?;
+                let next_token = pagination_token
+                    .get_next_page(count)
+                    .map(|value| value.to_string());
 
-        let next_token = pagination_token
-            .get_next_page(count)
-            .map(|value| value.to_string());
+                Ok::<_, AwsError>((secret, versions, next_token))
+            })
+            .await?;
 
         let versions = versions
             .into_iter()

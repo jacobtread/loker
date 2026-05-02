@@ -1,9 +1,11 @@
-use std::ops::DerefMut;
-
-use crate::database::{DbExecutor, DbResult, DbTransaction};
+use crate::database::DbResult;
 use chrono::{DateTime, Utc};
+use itertools::Itertools;
 use serde::Serialize;
-use sqlx::prelude::FromRow;
+use tokio_rusqlite::{
+    Row, params,
+    rusqlite::{self, Connection},
+};
 
 pub const MIGRATIONS: &[(&str, &str)] = &[(
     "m1_create_secrets_tables",
@@ -13,10 +15,21 @@ pub const MIGRATIONS: &[(&str, &str)] = &[(
 const MIGRATIONS_SETUP_SQL: &str = include_str!("./m0_create_migrations_table.sql");
 
 /// Structure for tracking migrations applied to the root
-#[derive(Debug, Clone, FromRow, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct Migration {
     name: String,
     applied_at: DateTime<Utc>,
+}
+
+impl<'a> TryFrom<&'a Row<'a>> for Migration {
+    type Error = rusqlite::Error;
+
+    fn try_from(value: &'a Row<'a>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: value.get("name")?,
+            applied_at: value.get("applied_at")?,
+        })
+    }
 }
 
 struct CreateMigration {
@@ -25,35 +38,31 @@ struct CreateMigration {
 }
 
 /// Create a new tenant migration
-async fn create_migration(db: impl DbExecutor<'_>, create: CreateMigration) -> DbResult<()> {
-    sqlx::query(
+fn create_migration(db: &Connection, create: CreateMigration) -> DbResult<()> {
+    db.execute(
         r#"
         INSERT INTO "migrations" ("name", "applied_at")
-        VALUES (?, ?)
+        VALUES (?1, ?2)
     "#,
-    )
-    .bind(create.name)
-    .bind(create.applied_at)
-    .execute(db)
-    .await?;
-
+        params![create.name, create.applied_at],
+    )?;
     Ok(())
 }
 
 /// Find all applied migrations
-async fn applied_migrations(db: impl DbExecutor<'_>) -> DbResult<Vec<Migration>> {
-    sqlx::query_as(r#"SELECT * FROM "migrations""#)
-        .fetch_all(db)
-        .await
+fn applied_migrations(db: &Connection) -> DbResult<Vec<Migration>> {
+    db.prepare(r#"SELECT * FROM "migrations""#)?
+        .query_map(params![], |row| Migration::try_from(row))?
+        .try_collect()
 }
 
-pub async fn setup_migrations(t: &mut DbTransaction<'_>) -> DbResult<()> {
-    apply_migration(t, "m0_create_migrations_table", MIGRATIONS_SETUP_SQL).await?;
+pub fn setup_migrations(t: &Connection) -> DbResult<()> {
+    apply_migration(t, "m0_create_migrations_table", MIGRATIONS_SETUP_SQL)?;
     Ok(())
 }
 
-pub async fn apply_migrations(t: &mut DbTransaction<'_>) -> DbResult<()> {
-    let migrations = applied_migrations(t.deref_mut()).await?;
+pub fn apply_migrations(t: &Connection) -> DbResult<()> {
+    let migrations = applied_migrations(t)?;
 
     for (migration_name, migration) in MIGRATIONS {
         // Skip already applied migrations
@@ -65,28 +74,23 @@ pub async fn apply_migrations(t: &mut DbTransaction<'_>) -> DbResult<()> {
         }
 
         // Apply the migration
-        apply_migration(t, migration_name, migration).await?;
+        apply_migration(t, migration_name, migration)?;
 
         // Store the applied migration
         create_migration(
-            t.deref_mut(),
+            t,
             CreateMigration {
                 name: migration_name.to_string(),
                 applied_at: Utc::now(),
             },
-        )
-        .await?;
+        )?;
     }
 
     Ok(())
 }
 
 /// Apply a migration to the specific database
-pub async fn apply_migration(
-    db: &mut DbTransaction<'_>,
-    migration_name: &str,
-    migration: &str,
-) -> DbResult<()> {
+pub fn apply_migration(db: &Connection, migration_name: &str, migration: &str) -> DbResult<()> {
     // Split the SQL queries into multiple queries
     let queries = migration
         .split(';')
@@ -94,13 +98,9 @@ pub async fn apply_migration(
         .filter(|query| !query.is_empty());
 
     for query in queries {
-        let result = sqlx::query(query)
-            .execute(db.deref_mut())
-            .await
-            .inspect_err(|error| {
-                tracing::error!(?error, ?migration_name, "failed to perform migration")
-            })?;
-        let rows_affected = result.rows_affected();
+        let rows_affected = db.execute(query, params![]).inspect_err(|error| {
+            tracing::error!(?error, ?migration_name, "failed to perform migration")
+        })?;
 
         tracing::debug!(?migration_name, ?rows_affected, "applied migration query");
     }

@@ -1,6 +1,6 @@
 use crate::{
     database::{
-        DbErr, DbPool,
+        DbErr,
         secrets::{get_secret_latest_version, put_secret_tag},
         transaction,
     },
@@ -12,7 +12,7 @@ use crate::{
 };
 use garde::Validate;
 use serde::{Deserialize, Serialize};
-use std::ops::DerefMut;
+use tokio_rusqlite::Connection;
 
 /// https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_TagResource.html
 pub struct TagResourceHandler;
@@ -36,26 +36,26 @@ impl Handler for TagResourceHandler {
     type Response = TagResourceResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
         let tags = request.tags;
 
-        let secret = get_secret_latest_version(db, &secret_id)
-            .await
-            .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
-            .ok_or(ResourceNotFoundException)?;
+        db.call(move |db| {
+            let secret = get_secret_latest_version(db, &secret_id)
+                .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
+                .ok_or(ResourceNotFoundException)?;
 
-        transaction(db, move |t| {
-            Box::pin(async move {
+            transaction(db, move |t| {
                 // Attach all the secrets
                 for tag in tags {
-                    put_secret_tag(t.deref_mut(), &secret.arn, &tag.key, &tag.value)
-                        .await
+                    put_secret_tag(t, &secret.arn, &tag.key, &tag.value)
                         .inspect_err(|error| tracing::error!(?error, "failed to set secret tag"))?;
                 }
 
                 Ok::<_, DbErr>(())
-            })
+            })?;
+
+            Ok::<_, AwsError>(())
         })
         .await?;
 

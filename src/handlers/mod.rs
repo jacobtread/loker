@@ -1,22 +1,19 @@
-use crate::{
-    database::DbPool,
-    handlers::{
-        batch_get_secret_value::BatchGetSecretValueHandler,
-        create_secret::CreateSecretHandler,
-        delete_secret::DeleteSecretHandler,
-        describe_secret::DescribeSecretHandler,
-        error::{AwsError, IntoErrorResponse},
-        get_random_password::GetRandomPasswordHandler,
-        get_secret_value::GetSecretValueHandler,
-        list_secret_version_ids::ListSecretVersionIdsHandler,
-        list_secrets::ListSecretsHandler,
-        put_secret_value::PutSecretValueHandler,
-        restore_secret::RestoreSecretHandler,
-        tag_resource::TagResourceHandler,
-        untag_resource::UntagResourceHandler,
-        update_secret::UpdateSecretHandler,
-        update_secret_version_stage::UpdateSecretVersionStageHandler,
-    },
+use crate::handlers::{
+    batch_get_secret_value::BatchGetSecretValueHandler,
+    create_secret::CreateSecretHandler,
+    delete_secret::DeleteSecretHandler,
+    describe_secret::DescribeSecretHandler,
+    error::{AwsError, IntoErrorResponse},
+    get_random_password::GetRandomPasswordHandler,
+    get_secret_value::GetSecretValueHandler,
+    list_secret_version_ids::ListSecretVersionIdsHandler,
+    list_secrets::ListSecretsHandler,
+    put_secret_value::PutSecretValueHandler,
+    restore_secret::RestoreSecretHandler,
+    tag_resource::TagResourceHandler,
+    untag_resource::UntagResourceHandler,
+    update_secret::UpdateSecretHandler,
+    update_secret_version_stage::UpdateSecretVersionStageHandler,
 };
 use axum::{
     Json,
@@ -32,6 +29,7 @@ use garde::Validate;
 use http_body_util::BodyExt;
 use serde::{Serialize, de::DeserializeOwned};
 use std::{collections::HashMap, convert::Infallible, sync::Arc, task::Poll};
+use tokio_rusqlite::Connection;
 use tower::Service;
 
 pub(crate) mod error;
@@ -128,7 +126,7 @@ impl Service<Request<Body>> for HandlerRouterService {
 
             let db = parts
                 .extensions
-                .get::<DbPool>()
+                .get::<Connection>()
                 .expect("handler router service missing db pool");
 
             let target = match parts
@@ -166,7 +164,7 @@ pub trait Handler: Send + Sync + 'static {
     type Response: Serialize + Send + 'static;
 
     fn handle<'d>(
-        db: &'d DbPool,
+        db: &'d Connection,
         request: Self::Request,
     ) -> impl Future<Output = Result<Self::Response, AwsError>> + Send + 'd;
 }
@@ -174,7 +172,7 @@ pub trait Handler: Send + Sync + 'static {
 /// Associated type erased [Handler] that takes a generic request and provides
 /// a generic response
 pub trait ErasedHandler: Send + Sync + 'static {
-    fn handle<'r>(&self, db: &'r DbPool, request: &'r [u8]) -> BoxFuture<'r, Response>;
+    fn handle<'r>(&self, db: &'r Connection, request: &'r [u8]) -> BoxFuture<'r, Response>;
 }
 
 /// Handler that takes care of the process of deserializing the request
@@ -184,7 +182,7 @@ pub struct HandlerBase<H: Handler> {
 }
 
 impl<H: Handler> ErasedHandler for HandlerBase<H> {
-    fn handle<'r>(&self, db: &'r DbPool, request: &'r [u8]) -> BoxFuture<'r, Response> {
+    fn handle<'r>(&self, db: &'r Connection, request: &'r [u8]) -> BoxFuture<'r, Response> {
         Box::pin(async move {
             let request: H::Request = match serde_json::from_slice(request) {
                 Ok(value) => value,

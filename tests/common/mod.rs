@@ -2,15 +2,15 @@ use std::net::SocketAddr;
 
 use axum::{Extension, Router, routing::post_service};
 use loker::{
-    database::{DbPool, initialize_database},
+    database::initialize_database,
     handlers::{self},
     middleware::aws_sig_v4::AwsSigV4AuthLayer,
 };
-use sqlx::sqlite::SqlitePoolOptions;
 
 use aws_config::{BehaviorVersion, Region, SdkConfig};
 use aws_sdk_secretsmanager::config::{Credentials, SharedCredentialsProvider};
 use tokio::task::AbortHandle;
+use tokio_rusqlite::Connection;
 
 /// Create an AWS sdk config for use in tests
 #[allow(dead_code)]
@@ -25,7 +25,7 @@ pub fn test_sdk_config(endpoint_url: &str, credentials: Credentials) -> SdkConfi
 
 #[allow(dead_code)]
 pub struct TestServer {
-    pub db: DbPool,
+    pub db: Connection,
     pub abort_handle: AbortHandle,
 }
 
@@ -36,27 +36,21 @@ impl Drop for TestServer {
 }
 
 #[allow(dead_code)]
-pub async fn test_memory_database() -> DbPool {
-    let pool = SqlitePoolOptions::new()
-        .after_connect(move |connection, _metadata| {
-            Box::pin(async move {
-                // Enable case sensitive LIKE
-                sqlx::query("PRAGMA case_sensitive_like = ON;")
-                    .execute(connection)
-                    .await?;
-
-                Ok(())
-            })
-        })
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    initialize_database(&pool).await.unwrap();
-    pool
+pub async fn test_memory_database() -> Connection {
+    let db = Connection::open_in_memory().await.unwrap();
+    db.call_unwrap(move |db| {
+        db.pragma_update(None, "case_sensitive_like", true).unwrap();
+        initialize_database(db).unwrap();
+    })
+    .await;
+    db
 }
 
 #[allow(dead_code)]
-pub async fn start_test_server(db: DbPool, credentials: Credentials) -> (SocketAddr, AbortHandle) {
+pub async fn start_test_server(
+    db: Connection,
+    credentials: Credentials,
+) -> (SocketAddr, AbortHandle) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server_address = listener.local_addr().unwrap();
 

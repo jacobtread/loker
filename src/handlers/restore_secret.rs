@@ -1,8 +1,5 @@
 use crate::{
-    database::{
-        DbPool,
-        secrets::{cancel_delete_secret, get_secret_latest_version},
-    },
+    database::secrets::{cancel_delete_secret, get_secret_latest_version},
     handlers::{
         Handler,
         error::{AwsError, ResourceNotFoundException},
@@ -11,6 +8,7 @@ use crate::{
 };
 use garde::Validate;
 use serde::{Deserialize, Serialize};
+use tokio_rusqlite::Connection;
 
 /// https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_RestoreSecret.html
 pub struct RestoreSecretHandler;
@@ -35,17 +33,21 @@ impl Handler for RestoreSecretHandler {
     type Response = RestoreSecretResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
 
-        let secret = get_secret_latest_version(db, &secret_id)
-            .await
-            .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
-            .ok_or(ResourceNotFoundException)?;
+        let secret = db
+            .call(move |db| {
+                let secret = get_secret_latest_version(db, &secret_id)
+                    .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
+                    .ok_or(ResourceNotFoundException)?;
 
-        cancel_delete_secret(db, &secret.arn)
-            .await
-            .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?;
+                cancel_delete_secret(db, &secret.arn)
+                    .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?;
+
+                Ok::<_, AwsError>(secret)
+            })
+            .await?;
 
         Ok(RestoreSecretResponse {
             arn: secret.arn,

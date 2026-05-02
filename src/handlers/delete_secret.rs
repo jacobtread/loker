@@ -1,8 +1,5 @@
 use crate::{
-    database::{
-        DbPool,
-        secrets::{delete_secret, get_secret_latest_version, schedule_delete_secret},
-    },
+    database::secrets::{delete_secret, get_secret_latest_version, schedule_delete_secret},
     handlers::{
         Handler,
         error::{AwsError, ResourceNotFoundException},
@@ -13,6 +10,7 @@ use crate::{
 use chrono::Utc;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
+use tokio_rusqlite::Connection;
 
 /// https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_DeleteSecret.html
 pub struct DeleteSecretHandler;
@@ -53,7 +51,7 @@ impl Handler for DeleteSecretHandler {
     type Response = DeleteSecretResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
         let DeleteSecretRequest {
             force_delete_without_recovery,
             recovery_window_in_days,
@@ -62,36 +60,36 @@ impl Handler for DeleteSecretHandler {
 
         let SecretId(secret_id) = secret_id;
 
-        let secret = get_secret_latest_version(db, &secret_id)
-            .await
-            //
-            .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
-            //
-            .ok_or(ResourceNotFoundException)?;
+        let (secret, deletion_date) = db
+            .call(move |db| -> Result<_, AwsError> {
+                let secret = get_secret_latest_version(db, &secret_id)
+                    //
+                    .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
+                    //
+                    .ok_or(ResourceNotFoundException)?;
 
-        // Secret is already scheduled for deletion
-        if let Some(scheduled_deletion_date) = secret.scheduled_delete_at {
-            return Ok(DeleteSecretResponse {
-                arn: secret.arn,
-                name: secret.name,
-                deletion_date: datetime_to_f64(scheduled_deletion_date),
-            });
-        }
+                // Secret is already scheduled for deletion
+                if let Some(scheduled_deletion_date) = secret.scheduled_delete_at {
+                    return Ok((secret, scheduled_deletion_date));
+                }
 
-        let deletion_date = if force_delete_without_recovery {
-            delete_secret(db, &secret.arn)
-                .await
-                .inspect_err(|error| tracing::error!(?error, "failed to delete secret"))?;
+                let deletion_date = if force_delete_without_recovery {
+                    delete_secret(db, &secret.arn)
+                        .inspect_err(|error| tracing::error!(?error, "failed to delete secret"))?;
 
-            // Secret has been deleted
-            Utc::now()
-        } else {
-            schedule_delete_secret(db, &secret.arn, recovery_window_in_days)
-                .await
-                .inspect_err(|error| {
-                    tracing::error!(?error, "failed to mark secret for deletion");
-                })?
-        };
+                    // Secret has been deleted
+                    Utc::now()
+                } else {
+                    schedule_delete_secret(db, &secret.arn, recovery_window_in_days).inspect_err(
+                        |error| {
+                            tracing::error!(?error, "failed to mark secret for deletion");
+                        },
+                    )?
+                };
+
+                Ok((secret, deletion_date))
+            })
+            .await?;
 
         Ok(DeleteSecretResponse {
             arn: secret.arn,
