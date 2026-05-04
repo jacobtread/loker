@@ -251,7 +251,11 @@ async fn test_put_secret_value_version_stage() {
         .await
         .unwrap();
 
-    let versions = get_secret_versions(&server.db, create_response.arn().unwrap())
+    let arn = create_response.arn().unwrap().to_string();
+
+    let versions = server
+        .db
+        .call_unwrap(move |db| get_secret_versions(db, &arn))
         .await
         .unwrap();
 

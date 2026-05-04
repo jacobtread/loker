@@ -1,13 +1,18 @@
 use crate::{
-    database::{DbErr, DbExecutor, DbResult},
+    database::{DbResult, ext::RowExt},
     handlers::models::Filter,
     utils::filter::split_search_terms,
 };
 use chrono::{DateTime, Days, Utc};
+use itertools::Itertools;
 use serde::Deserialize;
-use sqlx::prelude::FromRow;
+use tokio_rusqlite::{
+    OptionalExtension, Row, ToSql, params, params_from_iter,
+    rusqlite::{self, Connection},
+    types::FromSqlError,
+};
 
-#[derive(Clone, FromRow)]
+#[derive(Clone)]
 pub struct StoredSecret {
     pub arn: String,
     pub name: String,
@@ -18,7 +23,6 @@ pub struct StoredSecret {
     pub scheduled_delete_at: Option<DateTime<Utc>>,
     //
     pub version_id: String,
-    #[sqlx(json)]
     pub version_stages: Vec<String>,
     //
     pub description: Option<String>,
@@ -28,11 +32,43 @@ pub struct StoredSecret {
     pub version_created_at: DateTime<Utc>,
     pub version_last_accessed_at: Option<DateTime<Utc>>,
     //
-    #[sqlx(json)]
     pub version_tags: Vec<StoredVersionTags>,
 }
 
-#[derive(Clone, FromRow)]
+impl StoredSecret {
+    pub fn is_value_eq(
+        &self,
+        secret_string: &Option<String>,
+        secret_binary: &Option<String>,
+    ) -> bool {
+        self.secret_string.eq(secret_string) && self.secret_binary.eq(secret_binary)
+    }
+}
+
+impl<'a> TryFrom<&'a Row<'a>> for StoredSecret {
+    type Error = rusqlite::Error;
+
+    fn try_from(value: &'a Row<'a>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            arn: value.get("arn")?,
+            name: value.get("name")?,
+            created_at: value.get("created_at")?,
+            updated_at: value.get("updated_at")?,
+            deleted_at: value.get("deleted_at")?,
+            scheduled_delete_at: value.get("scheduled_delete_at")?,
+            version_id: value.get("version_id")?,
+            version_stages: value.get_json("version_stages")?,
+            description: value.get("description")?,
+            secret_string: value.get("secret_string")?,
+            secret_binary: value.get("secret_binary")?,
+            version_created_at: value.get("version_created_at")?,
+            version_last_accessed_at: value.get("Version_last_accessed_at")?,
+            version_tags: value.get_json("version_tags")?,
+        })
+    }
+}
+
+#[derive(Clone)]
 pub struct StoredSecretWithVersionStages {
     pub arn: String,
     pub name: String,
@@ -43,7 +79,6 @@ pub struct StoredSecretWithVersionStages {
     pub scheduled_delete_at: Option<DateTime<Utc>>,
     //
     pub version_id: String,
-    #[sqlx(json)]
     pub version_stages: Vec<String>,
     //
     pub description: Option<String>,
@@ -53,11 +88,33 @@ pub struct StoredSecretWithVersionStages {
     pub version_created_at: DateTime<Utc>,
     pub version_last_accessed_at: Option<DateTime<Utc>>,
     //
-    #[sqlx(json)]
     pub version_tags: Vec<StoredVersionTags>,
     //
-    #[sqlx(json)]
     pub versions: Vec<StoredVersionsListItem>,
+}
+
+impl<'a> TryFrom<&'a Row<'a>> for StoredSecretWithVersionStages {
+    type Error = rusqlite::Error;
+
+    fn try_from(value: &'a Row<'a>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            arn: value.get("arn")?,
+            name: value.get("name")?,
+            created_at: value.get("created_at")?,
+            updated_at: value.get("updated_at")?,
+            deleted_at: value.get("deleted_at")?,
+            scheduled_delete_at: value.get("scheduled_delete_at")?,
+            version_id: value.get("version_id")?,
+            version_stages: value.get_json("version_stages")?,
+            description: value.get("description")?,
+            secret_string: value.get("secret_string")?,
+            secret_binary: value.get("secret_binary")?,
+            version_created_at: value.get("version_created_at")?,
+            version_last_accessed_at: value.get("Version_last_accessed_at")?,
+            version_tags: value.get_json("version_tags")?,
+            versions: value.get_json("versions")?,
+        })
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -68,12 +125,11 @@ pub struct StoredVersionsListItem {
     pub last_accessed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone, FromRow)]
+#[derive(Clone)]
 pub struct SecretVersion {
     pub secret_arn: String,
     //
     pub version_id: String,
-    #[sqlx(json)]
     pub version_stages: Vec<String>,
     //
     pub secret_string: Option<String>,
@@ -81,6 +137,22 @@ pub struct SecretVersion {
     //
     pub created_at: DateTime<Utc>,
     pub last_accessed_at: Option<DateTime<Utc>>,
+}
+
+impl<'a> TryFrom<&'a Row<'a>> for SecretVersion {
+    type Error = rusqlite::Error;
+
+    fn try_from(value: &'a Row<'a>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            secret_arn: value.get("secret_arn")?,
+            version_id: value.get("version_id")?,
+            version_stages: value.get_json("version_stages")?,
+            secret_string: value.get("secret_string")?,
+            secret_binary: value.get("secret_binary")?,
+            created_at: value.get("created_at")?,
+            last_accessed_at: value.get("last_accessed_at")?,
+        })
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -98,82 +170,60 @@ pub struct CreateSecret {
 }
 
 /// Create a new "secret" with no versions
-pub async fn create_secret(db: impl DbExecutor<'_>, create: CreateSecret) -> DbResult<()> {
+pub fn create_secret(db: &Connection, create: CreateSecret) -> DbResult<()> {
     let created_at = Utc::now();
 
-    sqlx::query(
+    db.execute(
         r#"
         INSERT INTO "secrets" ("arn", "name", "description", "created_at") VALUES (?, ?, ?, ?)
     "#,
-    )
-    .bind(create.arn)
-    .bind(create.name)
-    .bind(create.description)
-    .bind(created_at)
-    .execute(db)
-    .await?;
+        params![create.arn, create.name, create.description, created_at],
+    )?;
 
     Ok(())
 }
 
 /// Updates the description of a secret
-pub async fn update_secret_description(
-    db: impl DbExecutor<'_>,
-    arn: &str,
-    description: &str,
-) -> DbResult<()> {
+pub fn update_secret_description(db: &Connection, arn: &str, description: &str) -> DbResult<usize> {
     let updated_at = Utc::now();
 
-    sqlx::query(
+    db.execute(
         r#"UPDATE "secrets" SET "description" = ?, "updated_at" = ? WHERE "secrets"."arn" = ?"#,
+        params![description, updated_at, arn],
     )
-    .bind(description)
-    .bind(updated_at)
-    .bind(arn)
-    .execute(db)
-    .await?;
-
-    Ok(())
 }
 
 /// Remove a secret
-pub async fn delete_secret(db: impl DbExecutor<'_>, secret_arn: &str) -> DbResult<()> {
-    sqlx::query(r#"DELETE FROM "secrets" WHERE "arn" = ?"#)
-        .bind(secret_arn)
-        .execute(db)
-        .await?;
-
-    Ok(())
+pub fn delete_secret(db: &Connection, secret_arn: &str) -> DbResult<usize> {
+    db.execute(
+        r#"DELETE FROM "secrets" WHERE "arn" = ?"#,
+        params![secret_arn],
+    )
 }
 
 /// Get the ARN's of all the secrets that are scheduled for deletion
 ///
 /// Not used by the actual application, only used within tests to ensure
 /// a deletion was properly scheduled
-pub async fn get_scheduled_secret_deletions(db: impl DbExecutor<'_>) -> DbResult<Vec<(String,)>> {
-    sqlx::query_as(r#"SELECT "arn" FROM "secrets" WHERE "scheduled_delete_at" IS NOT NULL"#)
-        .fetch_all(db)
-        .await
+pub fn get_scheduled_secret_deletions(db: &Connection) -> DbResult<Vec<String>> {
+    db.prepare(r#"SELECT "arn" FROM "secrets" WHERE "scheduled_delete_at" IS NOT NULL"#)?
+        .query_map(params![], |row| row.get::<_, String>(0))?
+        .try_collect()
 }
 
 /// Delete all secrets that have past their "scheduled_delete_at" date
 /// deletes anything where the scheduled_delete_at date is less than `before`
-pub async fn delete_scheduled_secrets(
-    db: impl DbExecutor<'_>,
-    before: DateTime<Utc>,
-) -> DbResult<()> {
-    sqlx::query(r#"DELETE FROM "secrets" WHERE "scheduled_delete_at" < ?"#)
-        .bind(before)
-        .execute(db)
-        .await?;
-
-    Ok(())
+pub fn delete_scheduled_secrets(db: &Connection, before: DateTime<Utc>) -> DbResult<usize> {
+    db.execute(
+        r#"DELETE FROM "secrets" WHERE "scheduled_delete_at" < ?"#,
+        params![before],
+    )
 }
 
 /// Mark a secret for deletion, sets the scheduled deletion date for `days` days
 /// into the future
-pub async fn schedule_delete_secret(
-    db: impl DbExecutor<'_>,
+pub fn schedule_delete_secret(
+    db: &Connection,
     secret_arn: &str,
     days: i32,
 ) -> DbResult<DateTime<Utc>> {
@@ -181,12 +231,12 @@ pub async fn schedule_delete_secret(
     let scheduled_deleted_at = deleted_at
         .checked_add_days(Days::new(days as u64))
         .ok_or_else(|| {
-            DbErr::Encode(Box::new(std::io::Error::other(
+            FromSqlError::other(Box::new(std::io::Error::other(
                 "failed to create a future timestamp",
             )))
         })?;
 
-    let (date,): (DateTime<Utc>,) = sqlx::query_as(
+    db.query_one(
         r#"
         UPDATE "secrets"
         SET
@@ -195,45 +245,32 @@ pub async fn schedule_delete_secret(
         WHERE "arn" = ?
         RETURNING "scheduled_delete_at"
         "#,
+        params![deleted_at, scheduled_deleted_at, secret_arn],
+        |row| row.get::<_, DateTime<Utc>>(0),
     )
-    .bind(deleted_at)
-    .bind(scheduled_deleted_at)
-    .bind(secret_arn)
-    .fetch_one(db)
-    .await?;
-
-    Ok(date)
 }
 
 /// Cancel a secrets deletion
-pub async fn cancel_delete_secret(db: impl DbExecutor<'_>, secret_arn: &str) -> DbResult<()> {
-    sqlx::query(
+pub fn cancel_delete_secret(db: &Connection, secret_arn: &str) -> DbResult<()> {
+    db.execute(
         r#"
         UPDATE "secrets"
         SET
             "deleted_at" = NULL,
             "scheduled_delete_at" = NULL
         WHERE "arn" = ?
-        RETURNING "scheduled_delete_at"
         "#,
-    )
-    .bind(secret_arn)
-    .execute(db)
-    .await?;
+        params![secret_arn],
+    )?;
 
     Ok(())
 }
 
 /// Set a tag on a secret
-pub async fn put_secret_tag(
-    db: impl DbExecutor<'_>,
-    secret_arn: &str,
-    key: &str,
-    value: &str,
-) -> DbResult<()> {
+pub fn put_secret_tag(db: &Connection, secret_arn: &str, key: &str, value: &str) -> DbResult<()> {
     let now = Utc::now();
 
-    sqlx::query(
+    db.execute(
         r#"
         INSERT INTO "secrets_tags" ("secret_arn", "key", "value", "created_at")
         VALUES (?, ?, ?, ?)
@@ -242,30 +279,18 @@ pub async fn put_secret_tag(
             "value" = "excluded"."value",
             "updated_at" = "excluded"."created_at"
         "#,
-    )
-    .bind(secret_arn)
-    .bind(key)
-    .bind(value)
-    .bind(now)
-    .execute(db)
-    .await?;
+        params![secret_arn, key, value, now],
+    )?;
 
     Ok(())
 }
 
 /// Remove a tag from a secret
-pub async fn remove_secret_tag(
-    db: impl DbExecutor<'_>,
-    secret_arn: &str,
-    key: &str,
-) -> DbResult<()> {
-    sqlx::query(r#"DELETE FROM "secrets_tags" WHERE "secret_arn" = ? AND "key" = ?"#)
-        .bind(secret_arn)
-        .bind(key)
-        .execute(db)
-        .await?;
-
-    Ok(())
+pub fn remove_secret_tag(db: &Connection, secret_arn: &str, key: &str) -> DbResult<usize> {
+    db.execute(
+        r#"DELETE FROM "secrets_tags" WHERE "secret_arn" = ? AND "key" = ?"#,
+        params![secret_arn, key],
+    )
 }
 
 pub struct CreateSecretVersion {
@@ -277,123 +302,95 @@ pub struct CreateSecretVersion {
 }
 
 /// Creates a new version of a secret
-pub async fn create_secret_version(
-    db: impl DbExecutor<'_>,
-    create: CreateSecretVersion,
-) -> DbResult<()> {
+pub fn create_secret_version(db: &Connection, create: CreateSecretVersion) -> DbResult<()> {
     let now = Utc::now();
 
-    sqlx::query(
+    db.execute(
         r#"
         INSERT INTO "secrets_versions" ("secret_arn", "version_id", "secret_string", "secret_binary", "created_at")
         VALUES (?, ?, ?, ?, ?)
         "#,
-    )
-    .bind(create.secret_arn)
-    .bind(create.version_id)
-    .bind(create.secret_string)
-    .bind(create.secret_binary)
-    .bind(now)
-    .execute(db)
-    .await?;
+        params![create.secret_arn, create.version_id, create.secret_string, create.secret_binary, now]
+    )?;
 
     Ok(())
 }
 
 /// Updates the last access date of a secret version
-pub async fn update_secret_version_last_accessed(
-    db: impl DbExecutor<'_>,
+pub fn update_secret_version_last_accessed(
+    db: &Connection,
     secret_arn: &str,
     version_id: &str,
 ) -> DbResult<()> {
     let now = Utc::now();
 
-    sqlx::query(
+    db.execute(
         r#"
         UPDATE "secrets_versions"
         SET "last_accessed_at" = ?
         WHERE "secret_arn" = ? AND "version_id" = ?"#,
-    )
-    .bind(now)
-    .bind(secret_arn)
-    .bind(version_id)
-    .execute(db)
-    .await?;
+        params![now, secret_arn, version_id],
+    )?;
 
     Ok(())
 }
 
 /// Add a secret version stage to a specific secret version
-pub async fn add_secret_version_stage(
-    db: impl DbExecutor<'_>,
+pub fn add_secret_version_stage(
+    db: &Connection,
     secret_arn: &str,
     version_id: &str,
     version_stage: &str,
 ) -> DbResult<()> {
     let created_at = Utc::now();
-    sqlx::query(
+    db.execute(
         r#"
         INSERT INTO "secret_version_stages" ("secret_arn", "version_id", "value", "created_at")
         VALUES (?, ?, ?, ?)
     "#,
-    )
-    .bind(secret_arn)
-    .bind(version_id)
-    .bind(version_stage)
-    .bind(created_at)
-    .execute(db)
-    .await?;
+        params![secret_arn, version_id, version_stage, created_at],
+    )?;
+
     Ok(())
 }
 
 /// Remove a secret version stage from a specific secret version
-pub async fn remove_secret_version_stage(
-    db: impl DbExecutor<'_>,
+pub fn remove_secret_version_stage(
+    db: &Connection,
     secret_arn: &str,
     version_id: &str,
     version_stage: &str,
-) -> DbResult<u64> {
-    let result = sqlx::query(
+) -> DbResult<usize> {
+    db.execute(
         r#"
         DELETE FROM "secret_version_stages"
         WHERE "secret_arn" = ? AND "version_id" = ? AND "value" = ?
     "#,
+        params![secret_arn, version_id, version_stage],
     )
-    .bind(secret_arn)
-    .bind(version_id)
-    .bind(version_stage)
-    .execute(db)
-    .await?;
-
-    Ok(result.rows_affected())
 }
 
 /// Remove a version stage label from any version in a secret
-pub async fn remove_secret_version_stage_any(
-    db: impl DbExecutor<'_>,
+pub fn remove_secret_version_stage_any(
+    db: &Connection,
     secret_arn: &str,
     version_stage: &str,
-) -> DbResult<u64> {
-    let result = sqlx::query(
+) -> DbResult<usize> {
+    db.execute(
         r#"
         DELETE FROM "secret_version_stages"
         WHERE "secret_arn" = ? AND "value" = ?
     "#,
+        params![secret_arn, version_stage],
     )
-    .bind(secret_arn)
-    .bind(version_stage)
-    .execute(db)
-    .await?;
-
-    Ok(result.rows_affected())
 }
 
 /// Get the current version of a secret where the name OR arn matches the `secret_id`
-pub async fn get_secret_latest_version(
-    db: impl DbExecutor<'_>,
+pub fn get_secret_latest_version(
+    db: &Connection,
     secret_id: &str,
 ) -> DbResult<Option<StoredSecret>> {
-    get_secret_by_version_stage(db, secret_id, "AWSCURRENT").await
+    get_secret_by_version_stage(db, secret_id, "AWSCURRENT")
 }
 
 /// Check if the value is a partial arn
@@ -420,14 +417,14 @@ fn make_partial_arn_like_query(value: &str) -> Option<String> {
 
 /// Get a secret where the name OR arn matches the `secret_id` and there is a version
 /// with the version ID of `version_id`
-pub async fn get_secret_by_version_id(
-    db: impl DbExecutor<'_>,
+pub fn get_secret_by_version_id(
+    db: &Connection,
     secret_id: &str,
     version_id: &str,
 ) -> DbResult<Option<StoredSecret>> {
     let partial_arn = make_partial_arn_like_query(secret_id);
 
-    sqlx::query_as(
+    db.query_one(
         r#"
         SELECT
             "secret".*,
@@ -462,26 +459,28 @@ pub async fn get_secret_by_version_id(
             OR (? = TRUE AND "secret"."arn" LIKE ?)
         LIMIT 1;
     "#,
+        params![
+            version_id,
+            secret_id,
+            secret_id,
+            partial_arn.is_some(),
+            partial_arn
+        ],
+        |row| StoredSecret::try_from(row),
     )
-    .bind(version_id)
-    .bind(secret_id)
-    .bind(secret_id)
-    .bind(partial_arn.is_some())
-    .bind(partial_arn)
-    .fetch_optional(db)
-    .await
+    .optional()
 }
 
 /// Get a secret where the name OR arn matches the `secret_id` and there is a version
 /// in `version_stage`
-pub async fn get_secret_by_version_stage(
-    db: impl DbExecutor<'_>,
+pub fn get_secret_by_version_stage(
+    db: &Connection,
     secret_id: &str,
     version_stage: &str,
 ) -> DbResult<Option<StoredSecret>> {
     let partial_arn = make_partial_arn_like_query(secret_id);
 
-    sqlx::query_as(
+    db.query_one(
         r#"
         SELECT
             "secret".*,
@@ -520,27 +519,29 @@ pub async fn get_secret_by_version_stage(
         ORDER BY "secret_version"."created_at" DESC
         LIMIT 1;
     "#,
+        params![
+            version_stage,
+            secret_id,
+            secret_id,
+            partial_arn.is_some(),
+            partial_arn
+        ],
+        |row| StoredSecret::try_from(row),
     )
-    .bind(version_stage)
-    .bind(secret_id)
-    .bind(secret_id)
-    .bind(partial_arn.is_some())
-    .bind(partial_arn)
-    .fetch_optional(db)
-    .await
+    .optional()
 }
 
 /// Get a secret where the name OR arn matches the `secret_id` and there is a version
 /// in `version_stage` with the version ID `version_id`
-pub async fn get_secret_by_version_stage_and_id(
-    db: impl DbExecutor<'_>,
+pub fn get_secret_by_version_stage_and_id(
+    db: &Connection,
     secret_id: &str,
     version_id: &str,
     version_stage: &str,
 ) -> DbResult<Option<StoredSecret>> {
     let partial_arn = make_partial_arn_like_query(secret_id);
 
-    sqlx::query_as(
+    db.query_one(
         r#"
         SELECT
             "secret".*,
@@ -578,15 +579,17 @@ pub async fn get_secret_by_version_stage_and_id(
             OR (? = TRUE AND "secret"."arn" LIKE ?)
         LIMIT 1;
     "#,
+        params![
+            version_id,
+            version_stage,
+            secret_id,
+            secret_id,
+            partial_arn.is_some(),
+            partial_arn
+        ],
+        |row| StoredSecret::try_from(row),
     )
-    .bind(version_id)
-    .bind(version_stage)
-    .bind(secret_id)
-    .bind(secret_id)
-    .bind(partial_arn.is_some())
-    .bind(partial_arn)
-    .fetch_optional(db)
-    .await
+    .optional()
 }
 
 /// Generates the WHERE portion of a filtered query appending it to `query` returning
@@ -767,8 +770,8 @@ fn push_secret_filter_where(filters: &[Filter], query: &mut String) -> Vec<Strin
 ///
 /// Paginated using the provided `limit` and `offset` use `asc` to order the results by creation date
 /// in ascending order, false to order descending
-pub async fn get_secrets_by_filter(
-    db: impl DbExecutor<'_>,
+pub fn get_secrets_by_filter(
+    db: &Connection,
     filters: &[Filter],
     include_planned_deletions: bool,
     limit: i64,
@@ -848,19 +851,23 @@ pub async fn get_secrets_by_filter(
     // Apply pagination
     query.push_str(r#"LIMIT ? OFFSET ?"#);
 
-    let mut query = sqlx::query_as(&query);
-
-    for bound in bound_values {
-        query = query.bind(bound);
-    }
-
-    query.bind(limit).bind(offset).fetch_all(db).await
+    db.prepare(&query)?
+        .query_map(
+            params_from_iter(
+                bound_values
+                    .iter()
+                    .map(|value| value as &dyn ToSql)
+                    .chain([&limit as &dyn ToSql, &offset as &dyn ToSql]),
+            ),
+            |row| StoredSecretWithVersionStages::try_from(row),
+        )?
+        .try_collect()
 }
 
 /// Get the total number of secrets filtered using the provided `filters`, will only include secrets planned for deletion
 /// if `include_planned_deletions` is true.
-pub async fn get_secrets_count_by_filter(
-    db: impl DbExecutor<'_>,
+pub fn get_secrets_count_by_filter(
+    db: &Connection,
     filters: &[Filter],
     include_planned_deletions: bool,
 ) -> DbResult<i64> {
@@ -881,22 +888,17 @@ pub async fn get_secrets_count_by_filter(
     }
 
     let bound_values = push_secret_filter_where(filters, &mut query);
-    let mut query = sqlx::query_as(&query);
 
-    for bound in bound_values {
-        query = query.bind(bound);
-    }
-
-    let (count,): (i64,) = query.fetch_one(db).await?;
-    Ok(count)
+    db.query_one(
+        &query,
+        params_from_iter(bound_values.iter().map(|value| value as &dyn ToSql)),
+        |row| row.get::<_, i64>(0),
+    )
 }
 
 /// Get all versions of a secret
-pub async fn get_secret_versions(
-    db: impl DbExecutor<'_>,
-    secret_arn: &str,
-) -> DbResult<Vec<SecretVersion>> {
-    sqlx::query_as(
+pub fn get_secret_versions(db: &Connection, secret_arn: &str) -> DbResult<Vec<SecretVersion>> {
+    db.prepare(
         r#"
         SELECT
             "secret_version".*,
@@ -910,22 +912,21 @@ pub async fn get_secret_versions(
         WHERE "secret_version"."secret_arn" = ?
         ORDER BY "secret_version"."created_at" DESC
     "#,
-    )
-    .bind(secret_arn)
-    .fetch_all(db)
-    .await
+    )?
+    .query_map(params![secret_arn], |row| SecretVersion::try_from(row))?
+    .try_collect()
 }
 
 /// Get the total number of versions for the secret
 ///
 /// Does not include versions without at least one attached version stage
 /// unless `include_deprecated` is specified
-pub async fn count_secret_versions(
-    db: impl DbExecutor<'_>,
+pub fn count_secret_versions(
+    db: &Connection,
     secret_arn: &str,
     include_deprecated: bool,
 ) -> DbResult<i64> {
-    let (count,): (i64,) = sqlx::query_as(
+    db.query_one(
         r#"
            SELECT COUNT(*)
            FROM "secrets_versions" "secret_version"
@@ -937,27 +938,23 @@ pub async fn count_secret_versions(
                        AND "version_stage"."version_id" = "secret_version"."version_id"
                ))
        "#,
+        params![secret_arn, include_deprecated],
+        |row| row.get::<_, i64>(0),
     )
-    .bind(secret_arn)
-    .bind(include_deprecated)
-    .fetch_one(db)
-    .await?;
-
-    Ok(count)
 }
 
 /// Get a versions page for a secret
 ///
 /// Does not include versions without at least one attached version stage
 /// unless `include_deprecated` is specified
-pub async fn get_secret_versions_page(
-    db: impl DbExecutor<'_>,
+pub fn get_secret_versions_page(
+    db: &Connection,
     secret_arn: &str,
     include_deprecated: bool,
     limit: i64,
     offset: i64,
 ) -> DbResult<Vec<SecretVersion>> {
-    sqlx::query_as(
+    db.prepare(
         r#"
             SELECT
                 "secret_version".*,
@@ -978,28 +975,27 @@ pub async fn get_secret_versions_page(
             ORDER BY "secret_version"."created_at" DESC
             LIMIT ? OFFSET ?
         "#,
-    )
-    .bind(secret_arn)
-    .bind(include_deprecated)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(db)
-    .await
+    )?
+    .query_map(
+        params![secret_arn, include_deprecated, limit, offset],
+        |row| SecretVersion::try_from(row),
+    )?
+    .try_collect()
 }
 
 /// Takes any secrets with over 100 versions and deletes any secrets that
 /// are over 24h old until there is only 100 versions for each secret
 ///
 /// Only allowed to delete versions that don't have a stage
-pub async fn delete_excess_secret_versions(db: impl DbExecutor<'_>) -> DbResult<()> {
+pub fn delete_excess_secret_versions(db: &Connection) -> DbResult<usize> {
     let now = Utc::now();
     let cutoff = now.checked_sub_days(Days::new(1)).ok_or_else(|| {
-        DbErr::Encode(Box::new(std::io::Error::other(
+        FromSqlError::other(Box::new(std::io::Error::other(
             "failed to create a future timestamp",
         )))
     })?;
 
-    sqlx::query(
+    db.execute(
         r#"
         WITH "ranked_versions" AS (
             SELECT
@@ -1024,10 +1020,6 @@ pub async fn delete_excess_secret_versions(db: impl DbExecutor<'_>) -> DbResult<
               )
         );
         "#,
+        params![cutoff],
     )
-    .bind(cutoff)
-    .execute(db)
-    .await?;
-
-    Ok(())
 }

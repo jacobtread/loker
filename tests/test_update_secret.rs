@@ -142,7 +142,10 @@ async fn test_update_secret_update_secret_string_with_update_description_success
         .await
         .unwrap();
 
-    let versions = get_secret_versions(&server.db, create_response.arn().unwrap())
+    let arn = create_response.arn().unwrap().to_string();
+    let versions = server
+        .db
+        .call_unwrap(move |db| get_secret_versions(db, &arn))
         .await
         .unwrap();
 
@@ -205,7 +208,10 @@ async fn test_update_secret_update_secret_string_with_set_description_success() 
         .await
         .unwrap();
 
-    let versions = get_secret_versions(&server.db, create_response.arn().unwrap())
+    let arn = create_response.arn().unwrap().to_string();
+    let versions = server
+        .db
+        .call_unwrap(move |db| get_secret_versions(db, &arn))
         .await
         .unwrap();
 
@@ -267,7 +273,10 @@ async fn test_update_secret_update_secret_string_success() {
         .await
         .unwrap();
 
-    let versions = get_secret_versions(&server.db, create_response.arn().unwrap())
+    let arn = create_response.arn().unwrap().to_string();
+    let versions = server
+        .db
+        .call_unwrap(move |db| get_secret_versions(db, &arn))
         .await
         .unwrap();
 
@@ -319,7 +328,10 @@ async fn test_update_secret_update_secret_binary_success() {
         .await
         .unwrap();
 
-    let versions = get_secret_versions(&server.db, create_response.arn().unwrap())
+    let arn = create_response.arn().unwrap().to_string();
+    let versions = server
+        .db
+        .call_unwrap(move |db| get_secret_versions(db, &arn))
         .await
         .unwrap();
 
@@ -373,7 +385,10 @@ async fn test_update_secret_update_secret_binary_success_with_update_description
         .await
         .unwrap();
 
-    let versions = get_secret_versions(&server.db, create_response.arn().unwrap())
+    let arn = create_response.arn().unwrap().to_string();
+    let versions = server
+        .db
+        .call_unwrap(move |db| get_secret_versions(db, &arn))
         .await
         .unwrap();
 
@@ -439,7 +454,10 @@ async fn test_update_secret_update_secret_binary_success_with_set_description_su
         .await
         .unwrap();
 
-    let versions = get_secret_versions(&server.db, create_response.arn().unwrap())
+    let arn = create_response.arn().unwrap().to_string();
+    let versions = server
+        .db
+        .call_unwrap(move |db| get_secret_versions(db, &arn))
         .await
         .unwrap();
 

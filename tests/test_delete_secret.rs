@@ -86,8 +86,12 @@ async fn test_delete_secret_scheduled_success() {
     assert_eq!(delete_response.name(), create_response.name());
 
     // Scheduled deletions should include the ARN
-    let deletions = get_scheduled_secret_deletions(&server.db).await.unwrap();
-    let (arn,) = deletions.first().expect("expecting deletion arn");
+    let deletions = server
+        .db
+        .call_unwrap(|db| get_scheduled_secret_deletions(db))
+        .await
+        .unwrap();
+    let arn = deletions.first().expect("expecting deletion arn");
     assert_eq!(arn, delete_response.arn().unwrap());
 
     // Deletion date should be present and non zero
@@ -116,7 +120,11 @@ async fn test_delete_secret_scheduled_success() {
         // Add enough days to be past the expiry
         .checked_add_days(Days::new(31))
         .unwrap();
-    delete_scheduled_secrets(&server.db, now).await.unwrap();
+    server
+        .db
+        .call_unwrap(move |db| delete_scheduled_secrets(db, now))
+        .await
+        .unwrap();
 
     // Attempting to load the secret should give a ResourceNotFoundException
     let get_error = client

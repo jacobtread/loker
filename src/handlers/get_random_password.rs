@@ -1,5 +1,5 @@
 use crate::{
-    database::DbPool,
+    database::DbHandle,
     handlers::{
         Handler,
         error::{AwsError, InvalidRequestException},
@@ -66,7 +66,7 @@ impl Handler for GetRandomPasswordHandler {
     type Response = GetRandomPasswordResponse;
 
     #[tracing::instrument(skip_all)]
-    async fn handle(_db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(_db: &DbHandle, request: Self::Request) -> Result<Self::Response, AwsError> {
         let GetRandomPasswordRequest {
             exclude_characters,
             exclude_lowercase,

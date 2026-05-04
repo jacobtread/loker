@@ -1,5 +1,5 @@
 use crate::database::{
-    DbPool,
+    DbHandle,
     secrets::{delete_excess_secret_versions, delete_scheduled_secrets},
 };
 use chrono::Utc;
@@ -16,7 +16,7 @@ pub enum BackgroundEvent {
     PurgeExcessSecrets,
 }
 
-pub async fn perform_background_tasks(db: DbPool) {
+pub async fn perform_background_tasks(db: DbHandle) {
     let events = vec![
         SchedulerQueueEvent {
             event: BackgroundEvent::PurgeDeletedSecrets,
@@ -35,14 +35,16 @@ pub async fn perform_background_tasks(db: DbPool) {
             BackgroundEvent::PurgeDeletedSecrets => {
                 tracing::debug!("performing background purge for presigned tasks");
                 let now = Utc::now();
-                if let Err(error) = delete_scheduled_secrets(&db, now).await {
+
+                if let Err(error) = db.call(move |db| delete_scheduled_secrets(db, now)).await {
                     tracing::error!(?error, "failed to performed scheduled secrets deletion")
                 }
             }
 
             BackgroundEvent::PurgeExcessSecrets => {
                 tracing::debug!("performing background deletion for secret version limits");
-                if let Err(error) = delete_excess_secret_versions(&db).await {
+
+                if let Err(error) = db.call(move |db| delete_excess_secret_versions(db)).await {
                     tracing::error!(
                         ?error,
                         "failed to performed background deletion for secret version limits"

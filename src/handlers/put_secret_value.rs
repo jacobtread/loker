@@ -1,6 +1,7 @@
 use crate::{
     database::{
-        DbPool,
+        DbHandle,
+        ext::SqlErrorExt,
         secrets::{
             CreateSecretVersion, add_secret_version_stage, create_secret_version,
             get_secret_by_version_id, get_secret_latest_version, remove_secret_version_stage_any,
@@ -18,7 +19,6 @@ use crate::{
 };
 use garde::Validate;
 use serde::{Deserialize, Serialize};
-use std::ops::DerefMut;
 
 // https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_PutSecretValue.html
 pub struct PutSecretValueHandler;
@@ -63,7 +63,7 @@ impl Handler for PutSecretValueHandler {
     type Response = PutSecretValueResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &DbHandle, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
         let ClientRequestToken(version_id) = request.client_request_token.unwrap_or_default();
 
@@ -92,43 +92,39 @@ impl Handler for PutSecretValueHandler {
             return Err(InvalidRequestException.into());
         }
 
-        let secret = get_secret_latest_version(db, &secret_id)
-            .await
-            .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
-            .ok_or(ResourceNotFoundException)?;
+        let response = db
+            .call(move |db| {
+                let secret = get_secret_latest_version(db, &secret_id)
+                    .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
+                    .ok_or(ResourceNotFoundException)?;
+                transaction(db, move |db| {
+                    // Create the new secret version
+                    if let Err(error) = create_secret_version(
+                        db,
+                        CreateSecretVersion {
+                            secret_arn: secret.arn.clone(),
+                            version_id: version_id.clone(),
+                            secret_string: secret_string.clone(),
+                            secret_binary: secret_binary.clone(),
+                        },
+                    ) {
+                        // Only constraint violations are recoverable
+                        if !error.is_constraint_violation() {
+                            tracing::error!(?error, "failed to create secret version");
+                            return Err(InternalServiceError.into());
+                        }
 
-        transaction(db, move |t| {
-            Box::pin(async move {
-                // Create the new secret version
-                if let Err(error) = create_secret_version(
-                    t.deref_mut(),
-                    CreateSecretVersion {
-                        secret_arn: secret.arn.clone(),
-                        version_id: version_id.clone(),
-                        secret_string: secret_string.clone(),
-                        secret_binary: secret_binary.clone(),
-                    },
-                )
-                .await
-                {
-                    if let Some(error) = error.as_database_error()
-                        && error.is_unique_violation()
-                    {
                         // Check if the secret has been created
-                        let secret =
-                            get_secret_by_version_id(t.deref_mut(), &secret.arn, &version_id)
-                                .await
-                                .inspect_err(|error| {
-                                    tracing::error!(?error, "failed to determine existing version")
-                                })?
-                                // Unlikely but not impossible if we hit the unique violation
-                                .ok_or(InternalServiceError)?;
+                        let secret = get_secret_by_version_id(db, &secret.arn, &version_id)
+                            .inspect_err(|error| {
+                                tracing::error!(?error, "failed to determine existing version")
+                            })?
+                            // Unlikely but not impossible if we hit the unique violation
+                            .ok_or(InternalServiceError)?;
 
                         // If the stored version data doesn't match this is an error that
                         // the resource already exists
-                        if secret.secret_string.ne(&secret_string)
-                            || secret.secret_binary.ne(&secret_binary)
-                        {
+                        if !secret.is_value_eq(&secret_string, &secret_binary) {
                             return Err(ResourceExistsException.into());
                         }
 
@@ -141,23 +137,9 @@ impl Handler for PutSecretValueHandler {
                         });
                     }
 
-                    tracing::error!(?error, "failed to create secret version");
-                    return Err(InternalServiceError.into());
-                }
-
-                // Add the requested stages
-                for version_stage in &version_stages {
-                    remove_secret_version_stage_any(t.deref_mut(), &secret.arn, version_stage)
-                        .await
-                        .inspect_err(|error| {
-                            tracing::error!(?error, "failed to remove version stage from secret")
-                        })?;
-
-                    // If we are re-assigning AWSCURRENT ensure that the previous secret is given AWSPREVIOUS
-                    if version_stage == "AWSCURRENT" {
-                        // Ensure nobody else has the AWSPREVIOUS stage
-                        remove_secret_version_stage_any(t.deref_mut(), &secret.arn, "AWSPREVIOUS")
-                            .await
+                    // Add the requested stages
+                    for version_stage in &version_stages {
+                        remove_secret_version_stage_any(db, &secret.arn, version_stage)
                             .inspect_err(|error| {
                                 tracing::error!(
                                     ?error,
@@ -165,40 +147,46 @@ impl Handler for PutSecretValueHandler {
                                 )
                             })?;
 
-                        // Add the AWSPREVIOUS stage to the old
-                        add_secret_version_stage(
-                            t.deref_mut(),
-                            &secret.arn,
-                            &secret.version_id,
-                            "AWSPREVIOUS",
-                        )
-                        .await
-                        .inspect_err(|error| {
-                            tracing::error!(?error, "failed to add AWSPREVIOUS tag to secret")
-                        })?;
+                        // If we are re-assigning AWSCURRENT ensure that the previous secret is given AWSPREVIOUS
+                        if version_stage == "AWSCURRENT" {
+                            // Ensure nobody else has the AWSPREVIOUS stage
+                            remove_secret_version_stage_any(db, &secret.arn, "AWSPREVIOUS")
+                                .inspect_err(|error| {
+                                    tracing::error!(
+                                        ?error,
+                                        "failed to remove version stage from secret"
+                                    )
+                                })?;
+
+                            // Add the AWSPREVIOUS stage to the old
+                            add_secret_version_stage(
+                                db,
+                                &secret.arn,
+                                &secret.version_id,
+                                "AWSPREVIOUS",
+                            )
+                            .inspect_err(|error| {
+                                tracing::error!(?error, "failed to add AWSPREVIOUS tag to secret")
+                            })?;
+                        }
+
+                        // Add the requested version stage
+                        add_secret_version_stage(db, &secret.arn, &version_id, version_stage)
+                            .inspect_err(|error| {
+                                tracing::error!(?error, "failed to add stage to secret")
+                            })?;
                     }
 
-                    // Add the requested version stage
-                    add_secret_version_stage(
-                        t.deref_mut(),
-                        &secret.arn,
-                        &version_id,
-                        version_stage,
-                    )
-                    .await
-                    .inspect_err(|error| {
-                        tracing::error!(?error, "failed to add stage to secret")
-                    })?;
-                }
-
-                Ok::<_, AwsError>(PutSecretValueResponse {
-                    arn: secret.arn,
-                    name: secret.name,
-                    version_id,
-                    version_stages,
+                    Ok::<_, AwsError>(PutSecretValueResponse {
+                        arn: secret.arn,
+                        name: secret.name,
+                        version_id,
+                        version_stages,
+                    })
                 })
             })
-        })
-        .await
+            .await?;
+
+        Ok(response)
     }
 }

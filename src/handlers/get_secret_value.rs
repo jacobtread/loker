@@ -1,6 +1,6 @@
 use crate::{
     database::{
-        DbPool,
+        DbHandle,
         secrets::{
             get_secret_by_version_id, get_secret_by_version_stage,
             get_secret_by_version_stage_and_id, get_secret_latest_version,
@@ -58,47 +58,51 @@ impl Handler for GetSecretValueHandler {
     type Response = GetSecretValueResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &DbHandle, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
         let version_id = request.version_id.map(VersionId::into_inner);
         let version_stage = request.version_stage;
 
-        let secret = match (&version_id, &version_stage) {
-            (None, None) => get_secret_latest_version(db, &secret_id).await,
-            (Some(version_id), Some(version_stage)) => {
-                get_secret_by_version_stage_and_id(db, &secret_id, version_id, version_stage).await
-            }
-            (Some(version_id), None) => get_secret_by_version_id(db, &secret_id, version_id).await,
-            (None, Some(version_stage)) => {
-                get_secret_by_version_stage(db, &secret_id, version_stage).await
-            }
-        };
+        let secret = db
+            .call(move |db| {
+                let secret = match (&version_id, &version_stage) {
+                    (None, None) => get_secret_latest_version(db, &secret_id),
+                    (Some(version_id), Some(version_stage)) => get_secret_by_version_stage_and_id(
+                        db,
+                        &secret_id,
+                        version_id,
+                        version_stage,
+                    ),
+                    (Some(version_id), None) => {
+                        get_secret_by_version_id(db, &secret_id, version_id)
+                    }
+                    (None, Some(version_stage)) => {
+                        get_secret_by_version_stage(db, &secret_id, version_stage)
+                    }
+                };
 
-        let secret = secret
-            .inspect_err(|error| tracing::error!(?error, "failed to get secret value"))?
-            .ok_or(ResourceNotFoundException)?;
+                let secret = secret
+                    .inspect_err(|error| tracing::error!(?error, "failed to get secret value"))?
+                    .ok_or(ResourceNotFoundException)?;
 
-        // Secret is scheduled for deletion
-        if secret.scheduled_delete_at.is_some() {
-            return Err(InvalidRequestException.into());
-        }
+                // Secret is scheduled for deletion
+                if secret.scheduled_delete_at.is_some() {
+                    return Err(InvalidRequestException.into());
+                }
 
-        // Update the access timestamp
-        update_secret_version_last_accessed(db, &secret.arn, &secret.version_id)
-            .await
-            .inspect_err(|error| {
-                tracing::error!(?error, "failed to update secret last accessed");
-            })?;
+                // Update the access timestamp
+                update_secret_version_last_accessed(db, &secret.arn, &secret.version_id)
+                    .inspect_err(|error| {
+                        tracing::error!(?error, "failed to update secret last accessed");
+                    })?;
 
-        let created_at = if version_id.is_some() {
-            secret.version_created_at
-        } else {
-            secret.created_at
-        };
+                Ok::<_, AwsError>(secret)
+            })
+            .await?;
 
         Ok(GetSecretValueResponse {
             arn: secret.arn,
-            created_date: datetime_to_f64(created_at),
+            created_date: datetime_to_f64(secret.version_created_at),
             name: secret.name,
             secret_string: secret.secret_string,
             secret_binary: secret.secret_binary,

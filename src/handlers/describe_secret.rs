@@ -1,6 +1,6 @@
 use crate::{
     database::{
-        DbPool,
+        DbHandle,
         secrets::{get_secret_latest_version, get_secret_versions},
     },
     handlers::{
@@ -69,19 +69,24 @@ impl Handler for DescribeSecretHandler {
     type Response = DescribeSecretResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &DbPool, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &DbHandle, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
 
-        let secret = get_secret_latest_version(db, &secret_id)
-            .await
-            //
-            .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
-            //
-            .ok_or(ResourceNotFoundException)?;
+        let (secret, versions) = db
+            .call(move |db| {
+                let secret = get_secret_latest_version(db, &secret_id)
+                    //
+                    .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
+                    //
+                    .ok_or(ResourceNotFoundException)?;
 
-        let versions = get_secret_versions(db, &secret.arn)
-            .await
-            .inspect_err(|error| tracing::error!(?error, "failed to get secret versions"))?;
+                let versions = get_secret_versions(db, &secret.arn).inspect_err(|error| {
+                    tracing::error!(?error, "failed to get secret versions")
+                })?;
+
+                Ok::<_, AwsError>((secret, versions))
+            })
+            .await?;
 
         let most_recently_used = versions
             .iter()

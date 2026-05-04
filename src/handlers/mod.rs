@@ -1,5 +1,5 @@
 use crate::{
-    database::DbPool,
+    database::DbHandle,
     handlers::{
         batch_get_secret_value::BatchGetSecretValueHandler,
         create_secret::CreateSecretHandler,
@@ -128,7 +128,7 @@ impl Service<Request<Body>> for HandlerRouterService {
 
             let db = parts
                 .extensions
-                .get::<DbPool>()
+                .get::<DbHandle>()
                 .expect("handler router service missing db pool");
 
             let target = match parts
@@ -166,7 +166,7 @@ pub trait Handler: Send + Sync + 'static {
     type Response: Serialize + Send + 'static;
 
     fn handle<'d>(
-        db: &'d DbPool,
+        db: &'d DbHandle,
         request: Self::Request,
     ) -> impl Future<Output = Result<Self::Response, AwsError>> + Send + 'd;
 }
@@ -174,7 +174,7 @@ pub trait Handler: Send + Sync + 'static {
 /// Associated type erased [Handler] that takes a generic request and provides
 /// a generic response
 pub trait ErasedHandler: Send + Sync + 'static {
-    fn handle<'r>(&self, db: &'r DbPool, request: &'r [u8]) -> BoxFuture<'r, Response>;
+    fn handle<'r>(&self, db: &'r DbHandle, request: &'r [u8]) -> BoxFuture<'r, Response>;
 }
 
 /// Handler that takes care of the process of deserializing the request
@@ -184,7 +184,7 @@ pub struct HandlerBase<H: Handler> {
 }
 
 impl<H: Handler> ErasedHandler for HandlerBase<H> {
-    fn handle<'r>(&self, db: &'r DbPool, request: &'r [u8]) -> BoxFuture<'r, Response> {
+    fn handle<'r>(&self, db: &'r DbHandle, request: &'r [u8]) -> BoxFuture<'r, Response> {
         Box::pin(async move {
             let request: H::Request = match serde_json::from_slice(request) {
                 Ok(value) => value,
