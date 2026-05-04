@@ -337,6 +337,261 @@ async fn test_batch_get_secret_value_find_by_filter_name() {
     assert_eq!(secret_3.secret_string(), Some("test-1"));
 }
 
+/// Tests that BatchGetSecretValue will update the last accessed timestamp of
+/// all the retrieved secrets when using a filter
+#[tokio::test]
+async fn test_batch_get_secret_value_find_by_filter_name_updates_last_accessed() {
+    let (client, _server) = test_server().await;
+
+    let create_response_1 = client
+        .create_secret()
+        .name("test-1")
+        .secret_string("test-1")
+        .send()
+        .await
+        .unwrap();
+
+    let create_response_2 = client
+        .create_secret()
+        .name("test-2")
+        .secret_string("test-2")
+        .send()
+        .await
+        .unwrap();
+
+    let create_response_3 = client
+        .create_secret()
+        .name("test-3")
+        .secret_string("test-3")
+        .send()
+        .await
+        .unwrap();
+
+    let create_response_4 = client
+        .create_secret()
+        .name("should-not-match-test-4")
+        .secret_string("test-4")
+        .send()
+        .await
+        .unwrap();
+
+    let create_response_5 = client
+        .create_secret()
+        .name("TEST-4")
+        .secret_string("test-4")
+        .send()
+        .await
+        .unwrap();
+
+    let secrets = client
+        .batch_get_secret_value()
+        .filters(
+            Filter::builder()
+                .key(aws_sdk_secretsmanager::types::FilterNameStringType::Name)
+                .values("test-")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    assert!(secrets.errors().is_empty());
+
+    let secret_values = secrets.secret_values();
+    assert_eq!(secret_values.len(), 3);
+
+    let mut secret_values = secret_values.iter();
+
+    let secret_1 = secret_values.next().unwrap();
+    assert_eq!(secret_1.arn(), create_response_3.arn());
+
+    let secret_2 = secret_values.next().unwrap();
+    assert_eq!(secret_2.arn(), create_response_2.arn());
+
+    let secret_3 = secret_values.next().unwrap();
+    assert_eq!(secret_3.arn(), create_response_1.arn());
+
+    let secret_1_describe = client
+        .describe_secret()
+        .secret_id(secret_1.arn().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert!(secret_1_describe.last_accessed_date().is_some());
+
+    let secret_1_describe = client
+        .describe_secret()
+        .secret_id(secret_1.arn().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert!(secret_1_describe.last_accessed_date().is_some());
+
+    let secret_2_describe = client
+        .describe_secret()
+        .secret_id(secret_2.arn().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert!(secret_2_describe.last_accessed_date().is_some());
+
+    let secret_3_describe = client
+        .describe_secret()
+        .secret_id(secret_3.arn().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert!(secret_3_describe.last_accessed_date().is_some());
+
+    let secret_4_describe = client
+        .describe_secret()
+        .secret_id(create_response_4.arn().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert!(secret_4_describe.last_accessed_date().is_none());
+
+    let secret_5_describe = client
+        .describe_secret()
+        .secret_id(create_response_5.arn().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert!(secret_5_describe.last_accessed_date().is_none());
+}
+
+/// Tests that BatchGetSecretValue finds all the expected secrets
+/// when searching by name and updates the last accessed timestamp
+#[tokio::test]
+async fn test_batch_get_secret_value_find_by_secret_names_updates_last_accessed() {
+    let (client, _server) = test_server().await;
+
+    let create_response_1 = client
+        .create_secret()
+        .name("test-1")
+        .secret_string("test-1")
+        .send()
+        .await
+        .unwrap();
+
+    let create_response_2 = client
+        .create_secret()
+        .name("test-2")
+        .secret_string("test-2")
+        .send()
+        .await
+        .unwrap();
+
+    let create_response_3 = client
+        .create_secret()
+        .name("test-3")
+        .secret_string("test-3")
+        .send()
+        .await
+        .unwrap();
+
+    let create_response_4 = client
+        .create_secret()
+        .name("test-4")
+        .secret_string("test-4")
+        .send()
+        .await
+        .unwrap();
+
+    let create_response_5 = client
+        .create_secret()
+        .name("test-5")
+        .secret_string("test-5")
+        .send()
+        .await
+        .unwrap();
+
+    let secrets = client
+        .batch_get_secret_value()
+        .secret_id_list("test-1")
+        .secret_id_list("test-2")
+        .secret_id_list("test-3")
+        .send()
+        .await
+        .unwrap();
+
+    assert!(secrets.errors().is_empty());
+
+    let secret_values = secrets.secret_values();
+    assert_eq!(secret_values.len(), 3);
+
+    let mut secret_values = secret_values.iter();
+
+    let secret_1 = secret_values.next().unwrap();
+    assert_eq!(secret_1.arn(), create_response_1.arn());
+
+    let secret_2 = secret_values.next().unwrap();
+    assert_eq!(secret_2.arn(), create_response_2.arn());
+
+    let secret_3 = secret_values.next().unwrap();
+    assert_eq!(secret_3.arn(), create_response_3.arn());
+
+    let secret_1_describe = client
+        .describe_secret()
+        .secret_id(secret_1.arn().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert!(secret_1_describe.last_accessed_date().is_some());
+
+    let secret_1_describe = client
+        .describe_secret()
+        .secret_id(secret_1.arn().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert!(secret_1_describe.last_accessed_date().is_some());
+
+    let secret_2_describe = client
+        .describe_secret()
+        .secret_id(secret_2.arn().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert!(secret_2_describe.last_accessed_date().is_some());
+
+    let secret_3_describe = client
+        .describe_secret()
+        .secret_id(secret_3.arn().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert!(secret_3_describe.last_accessed_date().is_some());
+
+    let secret_4_describe = client
+        .describe_secret()
+        .secret_id(create_response_4.arn().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert!(secret_4_describe.last_accessed_date().is_none());
+
+    let secret_5_describe = client
+        .describe_secret()
+        .secret_id(create_response_5.arn().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert!(secret_5_describe.last_accessed_date().is_none());
+}
+
 /// Tests that BatchGetSecretValue finds all the expected secrets
 /// when searching using a filter for description
 #[tokio::test]

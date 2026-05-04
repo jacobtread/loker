@@ -8,7 +8,10 @@ use crate::{
     },
     handlers::{
         Handler,
-        error::{AwsError, IntoErrorResponse, InvalidRequestException, ResourceNotFoundException},
+        error::{
+            AwsError, InternalServiceError, IntoErrorResponse, InvalidRequestException,
+            ResourceNotFoundException,
+        },
         models::{APIErrorType, Filter, PaginationToken},
     },
     utils::date::datetime_to_f64,
@@ -128,10 +131,15 @@ async fn batch_get_secrets_by_ids(
                     }
                 };
 
-                update_secret_version_last_accessed(db, &secret.arn, &secret.version_id)
-                    .inspect_err(|error| {
-                        tracing::error!(?error, name = %secret.name, "failed to update secret last accessed")
-                    })?;
+                if let Err(error) = update_secret_version_last_accessed(db, &secret.arn, &secret.version_id) {
+                    tracing::error!(?error, name = %secret.name, "failed to update secret last accessed");
+                    errors.push(APIErrorType {
+                        error_code: Some(InternalServiceError.type_name().to_string()),
+                        message: Some(InternalServiceError.to_string()),
+                        secret_id: Some(secret.arn),
+                    });
+                    continue;
+                }
 
                 secret_values.push(SecretValueEntry {
                     arn: secret.arn,
@@ -143,6 +151,7 @@ async fn batch_get_secrets_by_ids(
                     version_stages: secret.version_stages,
                 });
             }
+
 
             Ok::<_, AwsError>(BatchGetSecretValueResponse {
                 errors,
@@ -171,35 +180,47 @@ async fn batch_get_secrets_by_filter(
         .as_query_parts()
         .ok_or(InvalidRequestException)?;
 
-    let (secrets, count) = db
+    let (errors, next_token, secret_values) = db
         .call(move |db| {
-            Ok::<_, AwsError>((
-                get_secrets_by_filter(db, &filters, false, limit, offset, false)
-                    .inspect_err(|error| tracing::error!(?error, "failed to get secrets"))?,
-                get_secrets_count_by_filter(db, &filters, false)
-                    .inspect_err(|error| tracing::error!(?error, "failed to get secrets count"))?,
-            ))
+            let secrets = get_secrets_by_filter(db, &filters, false, limit, offset, false)
+                .inspect_err(|error| tracing::error!(?error, "failed to get secrets"))?;
+
+            let count = get_secrets_count_by_filter(db, &filters, false)
+                .inspect_err(|error| tracing::error!(?error, "failed to get secrets count"))?;
+
+            let mut errors: Vec<APIErrorType> = Vec::new();
+            let mut secret_values: Vec<SecretValueEntry> = Vec::new();
+
+            let next_token = pagination_token
+                .get_next_page(count)
+                .map(|value| value.to_string());
+
+            for secret in secrets {
+                if let Err(error) = update_secret_version_last_accessed(db, &secret.arn, &secret.version_id) {
+                    tracing::error!(?error, name = %secret.name, "failed to update secret last accessed");
+                    errors.push(APIErrorType {
+                        error_code: Some(InternalServiceError.type_name().to_string()),
+                        message: Some(InternalServiceError.to_string()),
+                        secret_id: Some(secret.arn),
+                    });
+                    continue;
+                }
+
+                secret_values.push(SecretValueEntry {
+                    arn: secret.arn,
+                    created_date: datetime_to_f64(secret.created_at),
+                    name: secret.name,
+                    secret_string: secret.secret_string,
+                    secret_binary: secret.secret_binary,
+                    version_id: secret.version_id,
+                    version_stages: secret.version_stages,
+                });
+            }
+
+
+            Ok::<_, AwsError>((errors, next_token, secret_values))
         })
         .await?;
-
-    let errors: Vec<APIErrorType> = Vec::new();
-    let mut secret_values: Vec<SecretValueEntry> = Vec::new();
-
-    let next_token = pagination_token
-        .get_next_page(count)
-        .map(|value| value.to_string());
-
-    for secret in secrets {
-        secret_values.push(SecretValueEntry {
-            arn: secret.arn,
-            created_date: datetime_to_f64(secret.created_at),
-            name: secret.name,
-            secret_string: secret.secret_string,
-            secret_binary: secret.secret_binary,
-            version_id: secret.version_id,
-            version_stages: secret.version_stages,
-        });
-    }
 
     Ok(BatchGetSecretValueResponse {
         errors,
