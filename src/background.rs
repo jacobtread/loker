@@ -1,7 +1,9 @@
-use crate::database::secrets::{delete_excess_secret_versions, delete_scheduled_secrets};
+use crate::database::{
+    DbHandle,
+    secrets::{delete_excess_secret_versions, delete_scheduled_secrets},
+};
 use chrono::Utc;
 use futures::StreamExt;
-use tokio_rusqlite::Connection;
 use tokio_simple_fixed_scheduler::{SchedulerEventStream, SchedulerQueueEvent};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
@@ -14,7 +16,7 @@ pub enum BackgroundEvent {
     PurgeExcessSecrets,
 }
 
-pub async fn perform_background_tasks(db: Connection) {
+pub async fn perform_background_tasks(db: DbHandle) {
     let events = vec![
         SchedulerQueueEvent {
             event: BackgroundEvent::PurgeDeletedSecrets,

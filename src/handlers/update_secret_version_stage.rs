@@ -1,5 +1,7 @@
 use crate::{
     database::{
+        DbHandle,
+        ext::SqlErrorExt,
         secrets::{
             add_secret_version_stage, get_secret_latest_version, remove_secret_version_stage,
             remove_secret_version_stage_any,
@@ -16,7 +18,6 @@ use crate::{
 };
 use garde::Validate;
 use serde::{Deserialize, Serialize};
-use tokio_rusqlite::{Connection, ErrorCode};
 
 // https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_UpdateSecretVersionStage.html
 pub struct UpdateSecretVersionStageHandler;
@@ -53,7 +54,7 @@ impl Handler for UpdateSecretVersionStageHandler {
     type Response = UpdateSecretVersionStageResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &DbHandle, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
         let version_stage = request.version_stage;
 
@@ -117,10 +118,7 @@ impl Handler for UpdateSecretVersionStageHandler {
                         )
                     {
                         // Version stage is already attached to another version
-                        if error
-                            .sqlite_error_code()
-                            .is_some_and(|code| matches!(code, ErrorCode::ConstraintViolation))
-                        {
+                        if error.is_constraint_violation() {
                             return Err(InvalidRequestException.into());
                         }
 

@@ -1,5 +1,8 @@
 use crate::{
-    database::secrets::{get_secrets_by_filter, get_secrets_count_by_filter},
+    database::{
+        DbHandle,
+        secrets::{get_secrets_by_filter, get_secrets_count_by_filter},
+    },
     handlers::{
         Handler,
         error::{AwsError, InvalidRequestException},
@@ -10,7 +13,6 @@ use crate::{
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tokio_rusqlite::Connection;
 
 // https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_ListSecrets.html
 pub struct ListSecretsHandler;
@@ -123,7 +125,7 @@ impl Handler for ListSecretsHandler {
     type Response = ListSecretsResponse;
 
     #[tracing::instrument(skip_all)]
-    async fn handle(db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &DbHandle, request: Self::Request) -> Result<Self::Response, AwsError> {
         let ListSecretsRequest {
             filters,
             include_planned_deletion,

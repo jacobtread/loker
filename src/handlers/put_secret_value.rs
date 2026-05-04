@@ -1,5 +1,7 @@
 use crate::{
     database::{
+        DbHandle,
+        ext::SqlErrorExt,
         secrets::{
             CreateSecretVersion, add_secret_version_stage, create_secret_version,
             get_secret_by_version_id, get_secret_latest_version, remove_secret_version_stage_any,
@@ -17,7 +19,6 @@ use crate::{
 };
 use garde::Validate;
 use serde::{Deserialize, Serialize};
-use tokio_rusqlite::{Connection, ErrorCode};
 
 // https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_PutSecretValue.html
 pub struct PutSecretValueHandler;
@@ -62,7 +63,7 @@ impl Handler for PutSecretValueHandler {
     type Response = PutSecretValueResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &DbHandle, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
         let ClientRequestToken(version_id) = request.client_request_token.unwrap_or_default();
 
@@ -107,37 +108,33 @@ impl Handler for PutSecretValueHandler {
                             secret_binary: secret_binary.clone(),
                         },
                     ) {
-                        if error
-                            .sqlite_error_code()
-                            .is_some_and(|code| matches!(code, ErrorCode::ConstraintViolation))
-                        {
-                            // Check if the secret has been created
-                            let secret = get_secret_by_version_id(db, &secret.arn, &version_id)
-                                .inspect_err(|error| {
-                                    tracing::error!(?error, "failed to determine existing version")
-                                })?
-                                // Unlikely but not impossible if we hit the unique violation
-                                .ok_or(InternalServiceError)?;
-
-                            // If the stored version data doesn't match this is an error that
-                            // the resource already exists
-                            if secret.secret_string.ne(&secret_string)
-                                || secret.secret_binary.ne(&secret_binary)
-                            {
-                                return Err(ResourceExistsException.into());
-                            }
-
-                            // Another request already created this version
-                            return Ok(PutSecretValueResponse {
-                                arn: secret.arn,
-                                name: secret.name,
-                                version_id: secret.version_id,
-                                version_stages: secret.version_stages,
-                            });
+                        // Only constraint violations are recoverable
+                        if !error.is_constraint_violation() {
+                            tracing::error!(?error, "failed to create secret version");
+                            return Err(InternalServiceError.into());
                         }
 
-                        tracing::error!(?error, "failed to create secret version");
-                        return Err(InternalServiceError.into());
+                        // Check if the secret has been created
+                        let secret = get_secret_by_version_id(db, &secret.arn, &version_id)
+                            .inspect_err(|error| {
+                                tracing::error!(?error, "failed to determine existing version")
+                            })?
+                            // Unlikely but not impossible if we hit the unique violation
+                            .ok_or(InternalServiceError)?;
+
+                        // If the stored version data doesn't match this is an error that
+                        // the resource already exists
+                        if !secret.is_value_eq(&secret_string, &secret_binary) {
+                            return Err(ResourceExistsException.into());
+                        }
+
+                        // Another request already created this version
+                        return Ok(PutSecretValueResponse {
+                            arn: secret.arn,
+                            name: secret.name,
+                            version_id: secret.version_id,
+                            version_stages: secret.version_stages,
+                        });
                     }
 
                     // Add the requested stages

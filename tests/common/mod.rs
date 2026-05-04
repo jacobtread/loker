@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use axum::{Extension, Router, routing::post_service};
 use loker::{
-    database::initialize_database,
+    database::{DbHandle, initialize_database},
     handlers::{self},
     middleware::aws_sig_v4::AwsSigV4AuthLayer,
 };
@@ -36,7 +36,7 @@ impl Drop for TestServer {
 }
 
 #[allow(dead_code)]
-pub async fn test_memory_database() -> Connection {
+pub async fn test_memory_database() -> DbHandle {
     let db = Connection::open_in_memory().await.unwrap();
     db.call_unwrap(move |db| {
         db.pragma_update(None, "case_sensitive_like", true).unwrap();

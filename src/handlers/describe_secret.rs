@@ -1,5 +1,8 @@
 use crate::{
-    database::secrets::{get_secret_latest_version, get_secret_versions},
+    database::{
+        DbHandle,
+        secrets::{get_secret_latest_version, get_secret_versions},
+    },
     handlers::{
         Handler,
         error::{AwsError, ResourceNotFoundException},
@@ -10,7 +13,6 @@ use crate::{
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tokio_rusqlite::Connection;
 
 // https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_DescribeSecret.html
 pub struct DescribeSecretHandler;
@@ -67,7 +69,7 @@ impl Handler for DescribeSecretHandler {
     type Response = DescribeSecretResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &DbHandle, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
 
         let (secret, versions) = db

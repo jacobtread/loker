@@ -1,6 +1,7 @@
 use crate::{
-    database::secrets::{
-        count_secret_versions, get_secret_latest_version, get_secret_versions_page,
+    database::{
+        DbHandle,
+        secrets::{count_secret_versions, get_secret_latest_version, get_secret_versions_page},
     },
     handlers::{
         Handler,
@@ -11,7 +12,6 @@ use crate::{
 };
 use garde::Validate;
 use serde::{Deserialize, Serialize};
-use tokio_rusqlite::Connection;
 
 // https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_ListSecretVersionIds.html
 pub struct ListSecretVersionIdsHandler;
@@ -80,7 +80,7 @@ impl Handler for ListSecretVersionIdsHandler {
     type Response = ListSecretVersionIdsResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &DbHandle, request: Self::Request) -> Result<Self::Response, AwsError> {
         let ListSecretVersionIdsRequest {
             include_deprecated,
             max_results,

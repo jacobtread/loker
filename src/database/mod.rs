@@ -10,6 +10,10 @@ pub mod ext;
 pub mod migrations;
 pub mod secrets;
 
+pub type DbHandle = Connection;
+
+pub type DbConnection = rusqlite::Connection;
+
 /// Short type alias for a database error
 pub type DbErr = rusqlite::Error;
 

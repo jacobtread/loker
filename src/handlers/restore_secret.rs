@@ -1,5 +1,8 @@
 use crate::{
-    database::secrets::{cancel_delete_secret, get_secret_latest_version},
+    database::{
+        DbHandle,
+        secrets::{cancel_delete_secret, get_secret_latest_version},
+    },
     handlers::{
         Handler,
         error::{AwsError, ResourceNotFoundException},
@@ -8,7 +11,6 @@ use crate::{
 };
 use garde::Validate;
 use serde::{Deserialize, Serialize};
-use tokio_rusqlite::Connection;
 
 /// https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_RestoreSecret.html
 pub struct RestoreSecretHandler;
@@ -33,7 +35,7 @@ impl Handler for RestoreSecretHandler {
     type Response = RestoreSecretResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &DbHandle, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
 
         let secret = db

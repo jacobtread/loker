@@ -1,5 +1,8 @@
 use crate::{
-    database::secrets::{delete_secret, get_secret_latest_version, schedule_delete_secret},
+    database::{
+        DbHandle,
+        secrets::{delete_secret, get_secret_latest_version, schedule_delete_secret},
+    },
     handlers::{
         Handler,
         error::{AwsError, ResourceNotFoundException},
@@ -10,7 +13,6 @@ use crate::{
 use chrono::Utc;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
-use tokio_rusqlite::Connection;
 
 /// https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_DeleteSecret.html
 pub struct DeleteSecretHandler;
@@ -51,7 +53,7 @@ impl Handler for DeleteSecretHandler {
     type Response = DeleteSecretResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &DbHandle, request: Self::Request) -> Result<Self::Response, AwsError> {
         let DeleteSecretRequest {
             force_delete_without_recovery,
             recovery_window_in_days,

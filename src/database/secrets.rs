@@ -35,6 +35,16 @@ pub struct StoredSecret {
     pub version_tags: Vec<StoredVersionTags>,
 }
 
+impl StoredSecret {
+    pub fn is_value_eq(
+        &self,
+        secret_string: &Option<String>,
+        secret_binary: &Option<String>,
+    ) -> bool {
+        self.secret_string.eq(secret_string) && self.secret_binary.eq(secret_binary)
+    }
+}
+
 impl<'a> TryFrom<&'a Row<'a>> for StoredSecret {
     type Error = rusqlite::Error;
 

@@ -1,12 +1,14 @@
-use crate::handlers::{
-    Handler,
-    error::{AwsError, InvalidRequestException},
+use crate::{
+    database::DbHandle,
+    handlers::{
+        Handler,
+        error::{AwsError, InvalidRequestException},
+    },
 };
 use garde::Validate;
 use rand::seq::{IndexedRandom, SliceRandom};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio_rusqlite::Connection;
 
 // https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_GetRandomPassword.html
 pub struct GetRandomPasswordHandler;
@@ -64,7 +66,7 @@ impl Handler for GetRandomPasswordHandler {
     type Response = GetRandomPasswordResponse;
 
     #[tracing::instrument(skip_all)]
-    async fn handle(_db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(_db: &DbHandle, request: Self::Request) -> Result<Self::Response, AwsError> {
         let GetRandomPasswordRequest {
             exclude_characters,
             exclude_lowercase,

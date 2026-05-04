@@ -1,5 +1,7 @@
 use crate::{
     database::{
+        DbHandle,
+        ext::SqlErrorExt,
         secrets::{
             CreateSecretVersion, add_secret_version_stage, create_secret_version,
             get_secret_latest_version, remove_secret_version_stage,
@@ -17,7 +19,6 @@ use crate::{
 };
 use garde::Validate;
 use serde::{Deserialize, Serialize};
-use tokio_rusqlite::{Connection, ErrorCode};
 
 // https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_UpdateSecret.html
 pub struct UpdateSecretHandler;
@@ -60,7 +61,7 @@ impl Handler for UpdateSecretHandler {
     type Response = UpdateSecretResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &DbHandle, request: Self::Request) -> Result<Self::Response, AwsError> {
         let UpdateSecretRequest {
             client_request_token,
             description,
@@ -110,10 +111,7 @@ impl Handler for UpdateSecretHandler {
                                 secret_binary,
                             },
                         ) {
-                            if error
-                                .sqlite_error_code()
-                                .is_some_and(|code| matches!(code, ErrorCode::ConstraintViolation))
-                            {
+                            if error.is_constraint_violation() {
                                 // Another request already created this version
                                 return Ok((secret, None));
                             }

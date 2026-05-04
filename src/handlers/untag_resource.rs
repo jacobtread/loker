@@ -1,6 +1,6 @@
 use crate::{
     database::{
-        DbErr,
+        DbConnection, DbErr, DbHandle,
         secrets::{get_secret_latest_version, remove_secret_tag},
         transaction,
     },
@@ -12,7 +12,6 @@ use crate::{
 };
 use garde::Validate;
 use serde::{Deserialize, Serialize};
-use tokio_rusqlite::Connection;
 
 /// https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_UntagResource.html
 pub struct UntagResourceHandler;
@@ -36,7 +35,7 @@ impl Handler for UntagResourceHandler {
     type Response = UntagResourceResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &DbHandle, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
         let tag_keys = request.tag_keys;
 
@@ -45,16 +44,7 @@ impl Handler for UntagResourceHandler {
                 .inspect_err(|error| tracing::error!(?error, "failed to get secret"))?
                 .ok_or(ResourceNotFoundException)?;
 
-            transaction(db, move |db| {
-                // Attach all the secrets
-                for key in tag_keys {
-                    remove_secret_tag(db, &secret.arn, &key).inspect_err(|error| {
-                        tracing::error!(?error, "failed to remove secret tag")
-                    })?;
-                }
-
-                Ok::<_, DbErr>(())
-            })?;
+            transaction(db, move |db| remove_secret_tags(db, &secret.arn, &tag_keys))?;
 
             Ok::<_, AwsError>(())
         })
@@ -62,4 +52,17 @@ impl Handler for UntagResourceHandler {
 
         Ok(UntagResourceResponse {})
     }
+}
+
+fn remove_secret_tags(
+    db: &DbConnection,
+    secret_arn: &str,
+    tag_keys: &[String],
+) -> Result<(), DbErr> {
+    for key in tag_keys {
+        remove_secret_tag(db, secret_arn, key)
+            .inspect_err(|error| tracing::error!(?error, "failed to remove secret tag"))?;
+    }
+
+    Ok(())
 }

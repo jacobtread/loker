@@ -1,7 +1,11 @@
 use crate::{
-    database::secrets::{
-        get_secret_by_version_id, get_secret_by_version_stage, get_secret_by_version_stage_and_id,
-        get_secret_latest_version, update_secret_version_last_accessed,
+    database::{
+        DbHandle,
+        secrets::{
+            get_secret_by_version_id, get_secret_by_version_stage,
+            get_secret_by_version_stage_and_id, get_secret_latest_version,
+            update_secret_version_last_accessed,
+        },
     },
     handlers::{
         Handler,
@@ -12,7 +16,6 @@ use crate::{
 };
 use garde::Validate;
 use serde::{Deserialize, Serialize};
-use tokio_rusqlite::Connection;
 
 // https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_GetSecretValue.html
 pub struct GetSecretValueHandler;
@@ -55,7 +58,7 @@ impl Handler for GetSecretValueHandler {
     type Response = GetSecretValueResponse;
 
     #[tracing::instrument(skip_all, fields(secret_id = %request.secret_id))]
-    async fn handle(db: &Connection, request: Self::Request) -> Result<Self::Response, AwsError> {
+    async fn handle(db: &DbHandle, request: Self::Request) -> Result<Self::Response, AwsError> {
         let SecretId(secret_id) = request.secret_id;
         let version_id = request.version_id.map(VersionId::into_inner);
         let version_stage = request.version_stage;
