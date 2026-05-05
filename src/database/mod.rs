@@ -38,6 +38,7 @@ pub enum CreateDatabaseError {
 pub async fn create_database(
     key: String,
     raw_path: String,
+    wal: bool,
 ) -> Result<Connection, CreateDatabaseError> {
     let path = Path::new(&raw_path);
     if !path.exists() {
@@ -57,6 +58,11 @@ pub async fn create_database(
     db.call(move |db| {
         db.pragma_update(None, "key", key)?;
         db.pragma_update(None, "case_sensitive_like", true)?;
+
+        if wal {
+            db.pragma_update(None, "journal_mode", "WAL")?;
+        }
+
         initialize_database(db)?;
         Ok(())
     })

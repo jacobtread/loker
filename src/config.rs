@@ -16,6 +16,10 @@ pub struct Config {
     /// Path to the server database file
     pub database_path: String,
 
+    /// Whether to use WAL (Write-ahead-log) mode when accessing the database
+    /// https://www.sqlite.org/wal.html
+    pub database_wal: bool,
+
     /// Server address to bind against
     pub server_address: SocketAddr,
 
@@ -43,6 +47,9 @@ pub enum ConfigError {
 
     #[error("SM_USE_HTTPS must be either true or false")]
     InvalidUseHttps,
+
+    #[error("SM_DATABASE_USE_WAL must be either true or false")]
+    InvalidDbWal,
 }
 
 impl Config {
@@ -67,6 +74,13 @@ impl Config {
 
         let database_path =
             std::env::var("SM_DATABASE_PATH").unwrap_or_else(|_| "secrets.db".to_string());
+
+        let database_wal = match std::env::var("SM_DATABASE_USE_WAL") {
+            Ok(value) => value
+                .parse::<bool>()
+                .map_err(|_| ConfigError::InvalidDbWal)?,
+            Err(_) => true,
+        };
 
         let use_https = match std::env::var("SM_USE_HTTPS") {
             Ok(value) => value
@@ -97,6 +111,7 @@ impl Config {
         Ok(Config {
             encryption_key,
             database_path,
+            database_wal,
             use_https,
             server_address,
             certificate_path,
