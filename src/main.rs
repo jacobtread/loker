@@ -46,7 +46,12 @@ async fn server() -> Result<(), Box<dyn Error>> {
     };
 
     // Setup database
-    let db = database::create_database(config.encryption_key, config.database_path).await?;
+    let db = database::create_database(
+        config.encryption_key,
+        config.database_path,
+        config.database_wal,
+    )
+    .await?;
 
     // Setup the handlers
     let handlers = handlers::create_handlers();
