@@ -808,12 +808,12 @@ pub fn get_secrets_by_filter(
                 SELECT json_group_array(
                     json_object(
                         'version_id', "secret_version"."version_id",
-                        'version_stages', COALESCE((
+                        'version_stages', json(COALESCE((
                             SELECT json_group_array("version_stage"."value")
                             FROM "secret_version_stages" "version_stage"
                             WHERE "version_stage"."secret_arn" = "secret_version"."secret_arn"
                                 AND "version_stage"."version_id" = "secret_version"."version_id"
-                        ), '[]'),
+                        ), '[]')),
                         'created_at', "secret_version"."created_at",
                         'last_accessed_at', "secret_version"."last_accessed_at"
                     )
@@ -859,7 +859,10 @@ pub fn get_secrets_by_filter(
                     .map(|value| value as &dyn ToSql)
                     .chain([&limit as &dyn ToSql, &offset as &dyn ToSql]),
             ),
-            |row| StoredSecretWithVersionStages::try_from(row),
+            |row| {
+                dbg!(&row);
+                StoredSecretWithVersionStages::try_from(row)
+            },
         )?
         .try_collect()
 }

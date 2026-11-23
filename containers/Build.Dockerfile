@@ -1,7 +1,7 @@
 # ----------------------------------------
 #  Builder part
 # ----------------------------------------
-FROM rust:1.93.1-trixie-bookworm AS builder
+FROM rust:1.100.0-trixie-bookworm AS builder
 
 WORKDIR /app
 

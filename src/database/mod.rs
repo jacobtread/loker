@@ -87,7 +87,7 @@ pub fn initialize_database(db: &mut rusqlite::Connection) -> DbResult<()> {
 /// ensures that if the action fails the database will rollback immediately
 pub fn transaction<A, O, E>(db: &mut rusqlite::Connection, action: A) -> Result<O, E>
 where
-    A: for<'a> FnOnce(&rusqlite::Connection) -> Result<O, E>,
+    A: FnOnce(&rusqlite::Connection) -> Result<O, E>,
     E: From<DbErr>,
 {
     let mut t = db
